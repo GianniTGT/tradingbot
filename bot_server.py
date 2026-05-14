@@ -42,18 +42,19 @@ SYMBOLS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","LINKUSDT",
 
 active_alerts = {}  # { "SOLUSDT": {"entry":..,"sl":..,"tp":..,"thread":..} }
 active_trades = {}  # { "SOLUSDT": {"entry":..,"sl":..,"tp":..,"thread":..} }
+_lock = threading.Lock()
+POSITION_SIZE = float(os.environ.get("POSITION_SIZE", "0"))
 offset = 0
 
 # ── Alarm Persistenz ──────────────────────────────────────────────────────────
 def save_alarms():
-    data = {sym: {"entry": v["entry"], "sl": v["sl"], "tp": v["tp"]}
-            for sym, v in active_alerts.items()}
+    with _lock:
+        data = {sym: {"entry": v["entry"], "sl": v["sl"], "tp": v["tp"]}
+                for sym, v in active_alerts.items()}
     with open(ALARMS_FILE, "w") as f:
         json.dump(data, f)
 
 def start_alarm_thread(coin, symbol, entry, sl, tp, notify=True):
-    if symbol in active_alerts:
-        return
     def monitor():
         if notify:
             if sl and tp:
@@ -81,15 +82,19 @@ def start_alarm_thread(coin, symbol, entry, sl, tp, notify=True):
                         time.sleep(60)
                         if symbol not in active_alerts: break
                         send(f"Erinnerung: <b>{coin}</b> bei ${entry}!")
-                    active_alerts.pop(symbol, None)
+                    with _lock:
+                        active_alerts.pop(symbol, None)
                     save_alarms()
                     break
                 last_price = price
                 time.sleep(20)
-            except: time.sleep(30)
+            except Exception: time.sleep(30)
 
-    t = threading.Thread(target=monitor, daemon=True)
-    active_alerts[symbol] = {"entry": entry, "sl": sl, "tp": tp, "thread": t}
+    with _lock:
+        if symbol in active_alerts:
+            return
+        t = threading.Thread(target=monitor, daemon=True)
+        active_alerts[symbol] = {"entry": entry, "sl": sl, "tp": tp, "thread": t}
     save_alarms()
     t.start()
 
@@ -100,7 +105,7 @@ def tg(method, **kwargs):
     try:
         with urlopen(Request(url, data=data), timeout=10) as r:
             return json.loads(r.read())
-    except: return {}
+    except Exception: return {}
 
 def send(text):
     tg("sendMessage", chat_id=CHAT_ID, text=text, parse_mode="HTML")
@@ -145,10 +150,12 @@ def cmd_price(parts):
         send("Verwendung: /price SOL"); return
     coin   = parts[1].upper().replace("USDT","")
     symbol = coin + "USDT"
+    if symbol not in SYMBOLS:
+        send(f"Unbekannter Coin: {coin}."); return
     try:
         price = get_price(symbol)
         send(f"<b>{coin}/USDT</b>: ${price}")
-    except:
+    except Exception:
         send(f"Coin {coin} nicht gefunden.")
 
 def cmd_scan():
@@ -192,7 +199,7 @@ def cmd_scan():
             else:
                 r = "Daily bear" if not trendd else "4h bear" if not trend4 else "kein PB"
                 results["no"].append(f"{coin} ({r})")
-        except:
+        except Exception:
             results["no"].append(f"{coin} (Fehler)")
 
     msg = f"<b>EMA20 Scan 4h — {datetime.now().strftime('%H:%M')}</b>\n\n"
@@ -210,29 +217,34 @@ def cmd_alarm(parts):
         send("Verwendung:\n/alarm BNB 674.50\n/alarm BNB 674.50 663.20 685.00"); return
     coin   = parts[1].upper().replace("USDT","")
     symbol = coin + "USDT"
+    if symbol not in SYMBOLS:
+        send(f"Unbekannter Coin: {coin}."); return
     try:
         entry = float(parts[2])
         sl    = float(parts[3]) if len(parts) > 3 else None
         tp    = float(parts[4]) if len(parts) > 4 else None
-    except:
+    except Exception:
         send("Ungültige Zahlen."); return
 
-    if symbol in active_alerts:
-        send(f"Alarm für {coin} läuft bereits. /stop {coin} zum Beenden."); return
+    with _lock:
+        if symbol in active_alerts:
+            send(f"Alarm für {coin} läuft bereits. /stop {coin} zum Beenden."); return
 
     start_alarm_thread(coin, symbol, entry, sl, tp)
 
 def cmd_alarme():
-    if not active_alerts:
+    with _lock:
+        snapshot = dict(active_alerts)
+    if not snapshot:
         send("Keine aktiven Alarme."); return
     msg = "<b>Aktive Alarme:</b>\n\n"
-    for sym, info in active_alerts.items():
+    for sym, info in snapshot.items():
         coin = sym.replace("USDT","")
         try:
             cur = get_price(sym)
             diff = round((cur - info["entry"]) / info["entry"] * 100, 2)
             dist = f"${cur} ({diff:+.2f}%)"
-        except:
+        except Exception:
             dist = "?"
         sl_tp = f" | SL ${info['sl']} | TP ${info['tp']}" if info["sl"] else ""
         msg += f"• <b>{coin}</b> → Alarm bei ${info['entry']}{sl_tp}\n  Jetzt: {dist}\n\n"
@@ -244,8 +256,11 @@ def cmd_stop(parts):
         send("Verwendung: /stop SOL"); return
     coin   = parts[1].upper().replace("USDT","")
     symbol = coin + "USDT"
-    if symbol in active_alerts:
-        active_alerts.pop(symbol)
+    if symbol not in SYMBOLS:
+        send(f"Unbekannter Coin: {coin}."); return
+    with _lock:
+        found = active_alerts.pop(symbol, None) is not None
+    if found:
         save_alarms()
         send(f"Alarm für <b>{coin}</b> gestoppt.")
     else:
@@ -254,16 +269,20 @@ def cmd_stop(parts):
 # ── Trade Monitoring ──────────────────────────────────────────────────────────
 def cmd_trade(parts):
     if len(parts) < 5:
-        send("Verwendung: /trade BNB 668.06 663.20 677.78"); return
+        send("Verwendung: /trade BNB 668.06 663.20 677.78 [pos_size]"); return
     coin   = parts[1].upper().replace("USDT","")
     symbol = coin + "USDT"
+    if symbol not in SYMBOLS:
+        send(f"Unbekannter Coin: {coin}."); return
     try:
         entry, sl, tp = float(parts[2]), float(parts[3]), float(parts[4])
-    except:
+        pos_size = float(parts[5]) if len(parts) > 5 else POSITION_SIZE
+    except Exception:
         send("Ungültige Zahlen."); return
 
-    if symbol in active_trades:
-        send(f"Trade-Überwachung für {coin} läuft bereits."); return
+    with _lock:
+        if symbol in active_trades:
+            send(f"Trade-Überwachung für {coin} läuft bereits."); return
 
     def monitor_trade():
         rr   = round((tp - entry) / (entry - sl), 1)
@@ -280,51 +299,53 @@ def cmd_trade(parts):
                 price = get_price(symbol)
                 now   = time.time()
 
-                # Preis-Update alle 4 Stunden
                 if now - last_update >= 14400:
                     pct = round((price - entry) / entry * 100, 2)
                     send(f"Update <b>{coin}</b>: ${price} ({pct:+.2f}% seit Entry)")
                     last_update = now
 
                 if price <= sl:
-                    loss = round((entry - price) * 8.9, 2)
+                    pnl_str = f"\nVerlust: ~${round((entry - price) * pos_size, 2)}" if pos_size else ""
                     send(
                         f"STOP LOSS GETROFFEN: <b>{coin}</b>\n"
-                        f"SL: ${sl} | Preis: ${price}\n"
-                        f"Verlust: ~${loss}\n\n"
+                        f"SL: ${sl} | Preis: ${price}{pnl_str}\n\n"
                         f"Trade ist beendet. Kein Stress, naechstes Setup kommt."
                     )
-                    active_trades.pop(symbol, None)
+                    with _lock:
+                        active_trades.pop(symbol, None)
                     break
 
                 if price >= tp:
-                    gain = round((price - entry) * 8.9, 2)
+                    pnl_str = f"\nGewinn: ~${round((price - entry) * pos_size, 2)}" if pos_size else ""
                     send(
                         f"TAKE PROFIT ERREICHT: <b>{coin}</b>\n"
-                        f"TP: ${tp} | Preis: ${price}\n"
-                        f"Gewinn: ~${gain}\n\n"
+                        f"TP: ${tp} | Preis: ${price}{pnl_str}\n\n"
                         f"Maschallah! Trade schliessen."
                     )
-                    active_trades.pop(symbol, None)
+                    with _lock:
+                        active_trades.pop(symbol, None)
                     break
 
                 time.sleep(20)
-            except: time.sleep(30)
+            except Exception: time.sleep(30)
 
     t = threading.Thread(target=monitor_trade, daemon=True)
-    active_trades[symbol] = {"entry": entry, "sl": sl, "tp": tp, "thread": t}
+    with _lock:
+        active_trades[symbol] = {"entry": entry, "sl": sl, "tp": tp, "thread": t}
     t.start()
 
 def cmd_trades():
-    if not active_trades:
+    with _lock:
+        snapshot = dict(active_trades)
+    if not snapshot:
         send("Keine laufenden Trades."); return
     msg = "<b>Laufende Trades:</b>\n\n"
-    for sym, info in active_trades.items():
+    for sym, info in snapshot.items():
         try:
             price = get_price(sym)
             pct   = round((price - info["entry"]) / info["entry"] * 100, 2)
             msg  += f"<b>{sym.replace('USDT','')}</b>: ${price} ({pct:+.2f}%)\nEntry ${info['entry']} | SL ${info['sl']} | TP ${info['tp']}\n\n"
-        except:
+        except Exception:
             msg += f"<b>{sym.replace('USDT','')}</b>: Entry ${info['entry']} | SL ${info['sl']} | TP ${info['tp']}\n\n"
     send(msg)
 
@@ -333,8 +354,11 @@ def cmd_stoptrade(parts):
         send("Verwendung: /stoptrade SOL"); return
     coin   = parts[1].upper().replace("USDT","")
     symbol = coin + "USDT"
-    if symbol in active_trades:
-        active_trades.pop(symbol)
+    if symbol not in SYMBOLS:
+        send(f"Unbekannter Coin: {coin}."); return
+    with _lock:
+        found = active_trades.pop(symbol, None) is not None
+    if found:
         send(f"Trade-Überwachung für <b>{coin}</b> gestoppt.")
     else:
         send(f"Kein laufender Trade für {coin}.")
@@ -349,10 +373,17 @@ def check_inbox():
             inbox = json.load(f)
         os.remove(INBOX_FILE)
         for sym, info in inbox.items():
+            if sym not in SYMBOLS:
+                continue
+            try:
+                entry = float(info["entry"])
+                sl    = float(info["sl"]) if info.get("sl") is not None else None
+                tp    = float(info["tp"]) if info.get("tp") is not None else None
+            except (ValueError, TypeError, KeyError):
+                continue
             coin = sym.replace("USDT","")
-            if sym not in active_alerts:
-                start_alarm_thread(coin, sym, info["entry"], info.get("sl"), info.get("tp"))
-    except: pass
+            start_alarm_thread(coin, sym, entry, sl, tp)
+    except Exception: pass
 
 # ── Automatische Scans (09:00 / 16:00 / 17:30 UTC+2 CEST) ───────────────────
 _scans_done = set()  # z.B. {"2026-05-15_09", "2026-05-15_16", "2026-05-15_17"}
@@ -425,7 +456,7 @@ def cmd_scan_typed(scan_type):
             else:
                 r = "Daily bear" if not trendd else "4h bear" if not trend4 else "kein PB"
                 results["no"].append(f"{coin} ({r})")
-        except:
+        except Exception:
             results["no"].append(f"{coin} (Fehler)")
 
     msg = f"<b>{prefix}</b>\n{'─'*28}\n\n"
@@ -465,7 +496,7 @@ def run_auto_scan_loop():
     while True:
         try:
             maybe_run_scheduled_scans()
-        except: pass
+        except Exception: pass
         time.sleep(60)
 
 def main():
@@ -476,13 +507,22 @@ def main():
         try:
             with open(ALARMS_FILE) as f:
                 saved = json.load(f)
+            restored = []
             for sym, info in saved.items():
+                if sym not in SYMBOLS:
+                    continue
+                try:
+                    entry = float(info["entry"])
+                    sl    = float(info["sl"]) if info.get("sl") is not None else None
+                    tp    = float(info["tp"]) if info.get("tp") is not None else None
+                except (ValueError, TypeError, KeyError):
+                    continue
                 coin = sym.replace("USDT","")
-                start_alarm_thread(coin, sym, info["entry"], info.get("sl"), info.get("tp"), notify=False)
-            if saved:
-                names = ", ".join(s.replace("USDT","") for s in saved)
-                send(f"Bot neugestartet. Alarme wiederhergestellt: <b>{names}</b>")
-        except: pass
+                start_alarm_thread(coin, sym, entry, sl, tp, notify=False)
+                restored.append(coin)
+            if restored:
+                send(f"Bot neugestartet. Alarme wiederhergestellt: <b>{', '.join(restored)}</b>")
+        except Exception: pass
 
     threading.Thread(target=run_auto_scan_loop, daemon=True).start()
 
@@ -521,7 +561,7 @@ def main():
             send("Bot gestoppt.")
             print("[Bot] Beendet.", flush=True)
             break
-        except: time.sleep(5)
+        except Exception: time.sleep(5)
 
 if __name__ == "__main__":
     main()

@@ -11,11 +11,15 @@ from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-with open("binance_config.json") as f:
-    cfg = json.load(f)
+import os as _os
+API_KEY    = _os.environ.get("BINANCE_API_KEY")
+API_SECRET = _os.environ.get("BINANCE_API_SECRET")
 
-API_KEY    = cfg["api_key"]
-API_SECRET = cfg["api_secret"]
+if not API_KEY or not API_SECRET:
+    with open(_os.path.join(_os.path.dirname(__file__), "binance_config.json")) as f:
+        cfg = json.load(f)
+    API_KEY    = cfg["api_key"]
+    API_SECRET = cfg["api_secret"]
 
 SYMBOLS = [
     "BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","LINKUSDT",
