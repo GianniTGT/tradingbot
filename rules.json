@@ -1,0 +1,103 @@
+{
+  "strategy": {
+    "name": "20 EMA Pullback",
+    "version": "1.0",
+    "description": "Trend-following strategy: long entries on pullbacks to the 20 EMA in a confirmed uptrend, short entries in a confirmed downtrend.",
+    "author": "Gianni",
+    "coins": ["BTC", "ETH", "SOL", "BNB", "LINK", "NEAR", "AVAX", "MAGIC", "DOT", "ADA", "XRP"]
+  },
+
+  "trend_filter": {
+    "description": "Price must be on the correct side of the EMA to qualify for a trade.",
+    "long_condition":  "close > ema20 AND ema20 is rising (slope > 0 for last 3 bars)",
+    "short_condition": "close < ema20 AND ema20 is falling (slope < 0 for last 3 bars)",
+    "higher_tf_confirmation": {
+      "enabled": true,
+      "timeframe": "1d",
+      "rule": "Daily EMA20 must align with trade direction"
+    }
+  },
+
+  "entry_rules": {
+    "long": {
+      "step_1": "Uptrend confirmed: price above rising EMA20 on primary TF (4h) AND daily TF",
+      "step_2": "Pullback: price retraces to touch or come within 0.5% of EMA20 from above",
+      "step_3": "Bounce candle: a bullish candle closes back above EMA20 after touching it",
+      "step_4": "Volume confirmation: volume on bounce candle >= 80% of 10-bar average volume",
+      "step_5": "RSI check: RSI(14) must be between 40 and 65 at entry (not overbought)"
+    },
+    "short": {
+      "step_1": "Downtrend confirmed: price below falling EMA20 on primary TF (4h) AND daily TF",
+      "step_2": "Pullback: price retraces to touch or come within 0.5% of EMA20 from below",
+      "step_3": "Rejection candle: a bearish candle closes back below EMA20 after touching it",
+      "step_4": "Volume confirmation: volume on rejection candle >= 80% of 10-bar average volume",
+      "step_5": "RSI check: RSI(14) must be between 35 and 60 at entry (not oversold)"
+    }
+  },
+
+  "invalidation_rules": {
+    "long":  "Do NOT enter if price closes more than 1.5% below EMA20 (breakdown)",
+    "short": "Do NOT enter if price closes more than 1.5% above EMA20 (breakout)",
+    "both":  [
+      "Avoid entries within 2h of major news/FOMC/CPI events",
+      "Skip if spread between EMA20 and price > 3% (too extended for pullback)",
+      "No new entries if daily trend is sideways (EMA20 slope near flat)"
+    ]
+  },
+
+  "risk_management": {
+    "risk_per_trade_pct": 1.0,
+    "risk_per_trade_max_pct": 1.5,
+    "rr_ratio": 2.0,
+    "direction": "LONG ONLY",
+    "max_open_positions": 3,
+    "max_correlated_positions": 2,
+    "stop_loss": {
+      "long": "Unter dem Low der Bounce-Kerze (oder 0.3% unter EMA20, das Weitere)",
+      "hard_max_pct": 1.5
+    },
+    "take_profit": {
+      "tp1": { "rr_ratio": 2.0, "size_pct": 100, "description": "Voll aussteigen bei 2:1" }
+    },
+    "position_sizing": "Risiko_USD / (Entry - StopLoss) = Anzahl Coins",
+    "position_sizing_example": "($10000 * 1%) / (Entry - SL) = Positionsgröße",
+    "scan_times": ["08:00", "15:00"],
+    "primary_timeframe": "4h",
+    "trend_confirmation_timeframe": "1d"
+  },
+
+  "timeframe_hierarchy": {
+    "context":   "1d  — determine trend direction",
+    "trigger":   "4h  — primary entry timeframe",
+    "precision": "1h  — fine-tune entry and SL placement"
+  },
+
+  "alert_conditions": {
+    "pre_alert": {
+      "trigger": "Price within 1% of EMA20 in correct trend direction",
+      "message": "⚠️ {coin} approaching EMA20 on {tf} — watch for pullback entry"
+    },
+    "entry_alert": {
+      "trigger": "Bounce/rejection candle confirmed AND all entry conditions met",
+      "message": "✅ {coin} EMA20 Pullback Entry — {direction} @ {price} | SL: {sl} | TP1: {tp1} | TP2: {tp2}"
+    },
+    "invalidation_alert": {
+      "trigger": "Price closes more than 1.5% beyond EMA20 in wrong direction",
+      "message": "❌ {coin} EMA20 setup INVALID — skip or close early"
+    }
+  },
+
+  "watchlist_notes": {
+    "BTC":   "Lead indicator — check BTC trend before entering alts",
+    "ETH":   "High liquidity, reliable EMA reactions",
+    "SOL":   "Volatile — use wider SL, confirm on 4h before entry",
+    "BNB":   "Moderate volatility, good EMA respect",
+    "LINK":  "Often leads ETH moves — watch for early signals",
+    "NEAR":  "High beta L1 — strong trending phases, good for TP3 trailing",
+    "AVAX":  "Strong trends — good for trailing TP3",
+    "MAGIC": "Low-cap gaming token — higher volatility, reduce position size, confirm with 4h volume",
+    "DOT":   "Lower volume — confirm with 4h volume filter",
+    "ADA":   "Slower mover — better signals on daily TF",
+    "XRP":   "News-sensitive — avoid during SEC-related events"
+  }
+}
