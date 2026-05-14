@@ -107,9 +107,9 @@ def start_alarm_thread(coin, symbol, entry, sl, tp, notify=True):
     def monitor():
         if notify:
             if sl and tp:
-                send(f"Alarm gesetzt: <b>{coin}</b>\nEntry: ${entry} | SL: ${sl} | TP: ${tp}")
+                send(f"Alarmi vendosur: <b>{coin}</b>\nEntry: ${entry} | SL: ${sl} | TP: ${tp}")
             else:
-                send(f"Alarm gesetzt: <b>{coin}</b> bei ${entry}")
+                send(f"Alarmi vendosur: <b>{coin}</b> te ${entry}")
         last_price = None
         while symbol in active_alerts:
             try:
@@ -118,19 +118,19 @@ def start_alarm_thread(coin, symbol, entry, sl, tp, notify=True):
                 if triggered:
                     if sl and tp:
                         send(
-                            f"ENTRY ERREICHT: <b>{coin}</b>\n"
-                            f"Preis: <b>${price}</b> | Entry: ${entry}\n"
+                            f"🚨 ENTRY ARRITUR: <b>{coin}</b>\n"
+                            f"Çmimi: <b>${price}</b> | Entry: ${entry}\n"
                             f"Stop Loss: ${sl}\n"
                             f"Take Profit: ${tp}\n\n"
-                            f"JETZT EINSTEIGEN!\n"
-                            f"/trade {coin} {entry} {sl} {tp}"
+                            f"⚡ HAP BINANCE TANI!\n"
+                            f"Pas blerjes: /trade {coin} {entry} {sl} {tp}"
                         )
                     else:
-                        send(f"ALARM: <b>{coin}</b> hat ${entry} erreicht!\nAktuell: <b>${price}</b>")
+                        send(f"🔔 ALARM: <b>{coin}</b> arriti ${entry}!\nÇmimi tani: <b>${price}</b>")
                     for _ in range(3):
                         time.sleep(60)
                         if symbol not in active_alerts: break
-                        send(f"Erinnerung: <b>{coin}</b> bei ${entry}!")
+                        send(f"⏰ Kujtesë: <b>{coin}</b> te ${entry} — ende aktiv!")
                     active_alerts.pop(symbol, None)
                     save_alarms()
                     break
@@ -178,32 +178,38 @@ def round_price(v):
 # ── Befehle ───────────────────────────────────────────────────────────────────
 def cmd_hilfe():
     send(
-        "<b>GianniTGT Trading Bot</b>\n\n"
-        "/scan — EMA20 Scan alle 15 Coins\n"
-        "/price SOL — Aktueller Preis\n"
-        "/alarm SOL 91.05 89.64 93.87 — Alarm bei Entry\n"
-        "/alarme — Aktive Alarme anzeigen\n"
-        "/stop SOL — Alarm stoppen\n\n"
-        "/trade SOL 91.05 89.64 93.87 — Laufenden Trade ueberwachen\n"
-        "/trades — Laufende Trades anzeigen\n"
-        "/stoptrade SOL — Trade-Ueberwachung stoppen\n\n"
-        "/hilfe — Diese Liste"
+        "<b>GianniTGT Trading Bot 🤖</b>\n\n"
+        "/scan — Skano 20 coins (EMA20)\n"
+        "/price BNB — Çmimi aktual\n"
+        "/alarm BNB 674.50 663.20 685 — Vendos alarm\n"
+        "/alarme — Shiko alarmet aktive\n"
+        "/stop BNB — Fshij alarmin\n\n"
+        "/trade BNB 674.50 663.20 685 — Monitoro trade aktiv\n"
+        "/trades — Shiko të gjitha trades\n"
+        "/stoptrade BNB — Ndalо monitorimin\n\n"
+        "/hilfe — Kjo listë"
     )
 
 def cmd_price(parts):
     if len(parts) < 2:
-        send("Verwendung: /price SOL"); return
+        send("Përdorimi: /price BNB"); return
     coin   = parts[1].upper().replace("USDT","")
     symbol = coin + "USDT"
     try:
         price = get_price(symbol)
         send(f"<b>{coin}/USDT</b>: ${price}")
     except:
-        send(f"Coin {coin} nicht gefunden.")
+        send(f"Coin {coin} nuk u gjet. Kontrollo emrin.")
 
 def cmd_scan():
-    send("Scanne 15 Coins... bitte warten.")
+    """Skan manual — me BTC filtër."""
+    btc_ok, btc_emoji, btc_desc = get_btc_status()
+    send(f"Duke skanuar 20 coins... prit.\n{btc_emoji} {btc_desc}")
     results = {"setup": [], "watch": [], "no": []}
+
+    if not btc_ok:
+        send(f"🔴 <b>{btc_desc}</b>\nNuk skanohet kur BTC është bearish.")
+        return
 
     for sym in SYMBOLS:
         coin = sym.replace("USDT","")
@@ -238,26 +244,26 @@ def cmd_scan():
                     tp = round_price(entry + rpt*2)
                     results["setup"].append(f"<b>{coin}</b> LONG\nEntry: ${entry} | SL: ${sl} (-{slpct}%) | TP: ${tp}\n/alarm {coin} {entry} {sl} {tp}")
             elif trend4 and trendd and inZone:
-                results["watch"].append(f"{coin} ({dist:+.2f}% zu EMA20)")
+                results["watch"].append(f"{coin} ({dist:+.2f}% nga EMA20)")
             else:
-                r = "Daily bear" if not trendd else "4h bear" if not trend4 else "kein PB"
+                r = "Daily bearish" if not trendd else "4h bearish" if not trend4 else "nuk ka pullback"
                 results["no"].append(f"{coin} ({r})")
         except:
-            results["no"].append(f"{coin} (Fehler)")
+            results["no"].append(f"{coin} (gabim)")
 
-    msg = f"<b>EMA20 Scan 4h — {datetime.now().strftime('%H:%M')}</b>\n\n"
+    msg = f"{btc_emoji} <b>{btc_desc}</b>\n<b>SKAN EMA20 — {datetime.now().strftime('%H:%M')}</b>\n\n"
     if results["setup"]:
-        msg += "SETUPS:\n" + "\n\n".join(results["setup"]) + "\n\n"
+        msg += "✅ SETUP:\n" + "\n\n".join(results["setup"]) + "\n\n"
     if results["watch"]:
-        msg += "BEOBACHTEN:\n" + " | ".join(results["watch"]) + "\n\n"
-    msg += "KEIN SETUP:\n" + " | ".join(results["no"])
+        msg += "👀 SHIQO KËTA:\n" + " | ".join(results["watch"]) + "\n\n"
+    if not results["setup"] and not results["watch"]:
+        msg += "Nuk ka setup. Prit konsolidim.\n\n"
+    msg += "❌ PA SETUP:\n" + " | ".join(results["no"])
     send(msg)
 
 def cmd_alarm(parts):
-    # Format A: /alarm BNB 674.50            (einfacher Preisalarm)
-    # Format B: /alarm BNB 674.50 663.20 685 (mit SL + TP)
     if len(parts) < 3:
-        send("Verwendung:\n/alarm BNB 674.50\n/alarm BNB 674.50 663.20 685.00"); return
+        send("Përdorimi:\n/alarm BNB 674.50\n/alarm BNB 674.50 663.20 685.00"); return
     coin   = parts[1].upper().replace("USDT","")
     symbol = coin + "USDT"
     try:
@@ -265,17 +271,17 @@ def cmd_alarm(parts):
         sl    = float(parts[3]) if len(parts) > 3 else None
         tp    = float(parts[4]) if len(parts) > 4 else None
     except:
-        send("Ungültige Zahlen."); return
+        send("Numra të pavlefshëm."); return
 
     if symbol in active_alerts:
-        send(f"Alarm für {coin} läuft bereits. /stop {coin} zum Beenden."); return
+        send(f"Alarmi për {coin} është tashmë aktiv. /stop {coin} për ta fshirë."); return
 
     start_alarm_thread(coin, symbol, entry, sl, tp)
 
 def cmd_alarme():
     if not active_alerts:
-        send("Keine aktiven Alarme."); return
-    msg = "<b>Aktive Alarme:</b>\n\n"
+        send("Nuk ka alarme aktive."); return
+    msg = "<b>Alarmet aktive:</b>\n\n"
     for sym, info in active_alerts.items():
         coin = sym.replace("USDT","")
         try:
@@ -285,19 +291,19 @@ def cmd_alarme():
         except:
             dist = "?"
         sl_tp = f" | SL ${info['sl']} | TP ${info['tp']}" if info["sl"] else ""
-        msg += f"• <b>{coin}</b> → Alarm bei ${info['entry']}{sl_tp}\n  Jetzt: {dist}\n\n"
-    msg += "/stop COIN — Alarm beenden"
+        msg += f"• <b>{coin}</b> → Alarm te ${info['entry']}{sl_tp}\n  Tani: {dist}\n\n"
+    msg += "/stop COIN — Fshij alarmin"
     send(msg)
 
 def cmd_stop(parts):
     if len(parts) < 2:
-        send("Verwendung: /stop SOL"); return
+        send("Përdorimi: /stop BNB"); return
     coin   = parts[1].upper().replace("USDT","")
     symbol = coin + "USDT"
     if symbol in active_alerts:
         active_alerts.pop(symbol)
         save_alarms()
-        send(f"Alarm für <b>{coin}</b> gestoppt.")
+        send(f"Alarmi për <b>{coin}</b> u fshi.")
     else:
         send(f"Kein aktiver Alarm für {coin}.")
 
@@ -313,16 +319,16 @@ def cmd_trade(parts):
         send("Ungültige Zahlen."); return
 
     if symbol in active_trades:
-        send(f"Trade-Überwachung für {coin} läuft bereits."); return
+        send(f"Monitorimi për {coin} është tashmë aktiv."); return
 
     def monitor_trade():
-        rr   = round((tp - entry) / (entry - sl), 1)
+        rr = round((tp - entry) / (entry - sl), 1)
         send(
-            f"Trade aktiv: <b>{coin} LONG</b>\n"
+            f"✅ Trade aktiv: <b>{coin} LONG</b>\n"
             f"Entry: ${entry}\n"
             f"SL: ${sl} | TP: ${tp}\n"
             f"RR: {rr}:1\n"
-            f"Ich benachrichtige dich bei SL oder TP."
+            f"Do të njoftohesh kur të arrihet SL ose TP."
         )
         last_update = time.time()
         while symbol in active_trades:
@@ -330,30 +336,26 @@ def cmd_trade(parts):
                 price = get_price(symbol)
                 now   = time.time()
 
-                # Preis-Update alle 4 Stunden
+                # Update çdo 4 orë
                 if now - last_update >= 14400:
                     pct = round((price - entry) / entry * 100, 2)
-                    send(f"Update <b>{coin}</b>: ${price} ({pct:+.2f}% seit Entry)")
+                    send(f"📊 Update <b>{coin}</b>: ${price} ({pct:+.2f}% nga entry)")
                     last_update = now
 
                 if price <= sl:
-                    loss = round((entry - price) * 8.9, 2)
                     send(
-                        f"STOP LOSS GETROFFEN: <b>{coin}</b>\n"
-                        f"SL: ${sl} | Preis: ${price}\n"
-                        f"Verlust: ~${loss}\n\n"
-                        f"Trade ist beendet. Kein Stress, naechstes Setup kommt."
+                        f"🔴 STOP LOSS U PREK: <b>{coin}</b>\n"
+                        f"SL: ${sl} | Çmimi: ${price}\n\n"
+                        f"Trade mbyllur. Mos u streso, setup tjetër vjen. 💪"
                     )
                     active_trades.pop(symbol, None)
                     break
 
                 if price >= tp:
-                    gain = round((price - entry) * 8.9, 2)
                     send(
-                        f"TAKE PROFIT ERREICHT: <b>{coin}</b>\n"
-                        f"TP: ${tp} | Preis: ${price}\n"
-                        f"Gewinn: ~${gain}\n\n"
-                        f"Maschallah! Trade schliessen."
+                        f"🟢 TAKE PROFIT ARRITUR: <b>{coin}</b>\n"
+                        f"TP: ${tp} | Çmimi: ${price}\n\n"
+                        f"Masha'Allah! Mbyll trade-in. 🎯"
                     )
                     active_trades.pop(symbol, None)
                     break
@@ -367,8 +369,8 @@ def cmd_trade(parts):
 
 def cmd_trades():
     if not active_trades:
-        send("Keine laufenden Trades."); return
-    msg = "<b>Laufende Trades:</b>\n\n"
+        send("Nuk ka trade aktive."); return
+    msg = "<b>Trades aktive:</b>\n\n"
     for sym, info in active_trades.items():
         try:
             price = get_price(sym)
@@ -380,14 +382,14 @@ def cmd_trades():
 
 def cmd_stoptrade(parts):
     if len(parts) < 2:
-        send("Verwendung: /stoptrade SOL"); return
+        send("Përdorimi: /stoptrade BNB"); return
     coin   = parts[1].upper().replace("USDT","")
     symbol = coin + "USDT"
     if symbol in active_trades:
         active_trades.pop(symbol)
-        send(f"Trade-Überwachung für <b>{coin}</b> gestoppt.")
+        send(f"Monitorimi për <b>{coin}</b> u ndalua.")
     else:
-        send(f"Kein laufender Trade für {coin}.")
+        send(f"Nuk ka trade aktiv për {coin}.")
 
 # ── SL Monitor: njofton kur SL < 1.5% pranë EMA20 ───────────────────────────
 _sl_alerted = {}  # { "BNBUSDT": "2026-05-15_candle_timestamp" }
@@ -573,7 +575,7 @@ def cmd_scan_typed(scan_type):
         best = max(vol_rank, key=lambda x: x[1])
         coin_b, vol_b, typ_b = best
         vol_str = f"{vol_b}x Durchschnitt"
-        flag    = "✅ Setup aktiv" if typ_b == "setup" else "👀 In der Zone"
+        flag    = "✅ Setup aktiv" if typ_b == "setup" else "👀 Afër EMA20, pret bounce"
         msg += f"{'─'*28}\n🏆 <b>Bester Kandidat Abend-Trade: {coin_b}</b>\nVolumen letzte 4h: <b>{vol_str}</b> — {flag}\n{'─'*28}\n\n"
 
     msg += f"<i>{hint}</i>"
@@ -613,14 +615,14 @@ def main():
                 start_alarm_thread(coin, sym, info["entry"], info.get("sl"), info.get("tp"), notify=False)
             if saved:
                 names = ", ".join(s.replace("USDT","") for s in saved)
-                send(f"Bot neugestartet. Alarme wiederhergestellt: <b>{names}</b>")
+                send(f"Boti u rinis. Alarmet u rikthyen: <b>{names}</b>")
         except: pass
 
     threading.Thread(target=run_auto_scan_loop, daemon=True).start()
     threading.Thread(target=monitor_sl_width, daemon=True).start()
     threading.Thread(target=monitor_btc_emergency, daemon=True).start()
 
-    send("Bot gestartet! Schreib /hilfe um alle Befehle zu sehen.")
+    send("🤖 Boti startoi! Shkruaj /hilfe për të parë të gjitha komandat.")
     print("[Bot] Läuft. Strg+C zum Beenden.", flush=True)
 
     while True:
@@ -649,7 +651,7 @@ def main():
                 elif cmd == "/trade":        cmd_trade(parts)
                 elif cmd == "/trades":       cmd_trades()
                 elif cmd == "/stoptrade":    cmd_stoptrade(parts)
-                else: send("Unbekannter Befehl. Schreib /hilfe")
+                else: send("Komandë e panjohur. Shkruaj /hilfe")
 
         except KeyboardInterrupt:
             send("Bot gestoppt.")
