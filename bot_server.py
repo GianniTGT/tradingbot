@@ -377,7 +377,8 @@ def cmd_scan_typed(scan_type):
         prefix = "MORGEN-SCAN 09:00:"
         hint   = "Nächste Scans: 16:00 (Frühwarnung) & 17:30 (Signal)"
 
-    results = {"setup": [], "watch": [], "no": []}
+    results  = {"setup": [], "watch": [], "no": []}
+    vol_rank = []  # für "Bester Kandidat" beim 17:30 Scan
 
     for sym in SYMBOLS:
         coin = sym.replace("USDT","")
@@ -391,17 +392,20 @@ def cmd_scan_typed(scan_type):
             o4 = [float(k[1]) for k in d4]
             l4 = [float(k[3]) for k in d4]
             h4 = [float(k[2]) for k in d4]
+            v4 = [float(k[5]) for k in d4]
             cd = [float(k[4]) for k in dd]
 
             ema4h = get_ema(c4); ema4h_prev = get_ema(c4[:-3])
             emad  = get_ema(cd)
 
-            trend4 = ema4h > ema4h_prev
-            trendd = cd[-1] > emad
-            zone   = ema4h * 0.005
-            inZone = l4[-1] <= ema4h+zone and h4[-1] >= ema4h-zone
-            bounce = inZone and c4[-1] > ema4h and c4[-1] > o4[-1]
-            dist   = round((c4[-1]-ema4h)/ema4h*100, 2)
+            trend4  = ema4h > ema4h_prev
+            trendd  = cd[-1] > emad
+            zone    = ema4h * 0.005
+            inZone  = l4[-1] <= ema4h+zone and h4[-1] >= ema4h-zone
+            bounce  = inZone and c4[-1] > ema4h and c4[-1] > o4[-1]
+            dist    = round((c4[-1]-ema4h)/ema4h*100, 2)
+            vol_avg = sum(v4[:-1]) / len(v4[:-1])
+            vol_rel = round(v4[-1] / vol_avg, 2)  # >1 = überdurchschnittlich
 
             if trend4 and trendd and bounce:
                 entry  = round_price(c4[-1])
@@ -414,8 +418,10 @@ def cmd_scan_typed(scan_type):
                         f"<b>{coin}</b> LONG\nEntry: ${entry} | SL: ${sl} (-{slpct}%) | TP: ${tp}\n"
                         f"/alarm {coin} {entry} {sl} {tp}"
                     )
+                    vol_rank.append((coin, vol_rel, "setup"))
             elif trend4 and trendd and inZone:
                 results["watch"].append(f"{coin} ({dist:+.2f}%)")
+                vol_rank.append((coin, vol_rel, "watch"))
             else:
                 r = "Daily bear" if not trendd else "4h bear" if not trend4 else "kein PB"
                 results["no"].append(f"{coin} ({r})")
@@ -429,6 +435,15 @@ def cmd_scan_typed(scan_type):
         msg += "BEOBACHTEN:\n" + " | ".join(results["watch"]) + "\n\n"
     if not results["setup"] and not results["watch"]:
         msg += "Keine Setups. Markt abwarten.\n\n"
+
+    # Bester Kandidat nur beim 17:30 Signal-Scan
+    if scan_type == "signal" and vol_rank:
+        best = max(vol_rank, key=lambda x: x[1])
+        coin_b, vol_b, typ_b = best
+        vol_str = f"{vol_b}x Durchschnitt"
+        flag    = "✅ Setup aktiv" if typ_b == "setup" else "👀 In der Zone"
+        msg += f"{'─'*28}\n🏆 <b>Bester Kandidat Abend-Trade: {coin_b}</b>\nVolumen letzte 4h: <b>{vol_str}</b> — {flag}\n{'─'*28}\n\n"
+
     msg += f"<i>{hint}</i>"
     send(msg)
 
