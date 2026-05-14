@@ -44,6 +44,56 @@ active_alerts = {}  # { "SOLUSDT": {"entry":..,"sl":..,"tp":..,"thread":..} }
 active_trades = {}  # { "SOLUSDT": {"entry":..,"sl":..,"tp":..,"thread":..} }
 offset = 0
 
+# ── BTC Boss Filter ───────────────────────────────────────────────────────────
+def get_btc_status():
+    """Kontrollon BTC mbi/nën EMA20 në 1h dhe 15m. Kthen (bullish, emoji, pershkrim)."""
+    results = {}
+    for tf in ["1h", "15m"]:
+        try:
+            url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval={tf}&limit=25"
+            with urlopen(url, timeout=8) as r:
+                data = json.loads(r.read())
+            closes = [float(k[4]) for k in data]
+            ema    = get_ema(closes)
+            price  = closes[-1]
+            results[tf] = price > ema
+        except:
+            results[tf] = True  # nëse API dështon, lejo skanimin
+
+    bullish_1h  = results.get("1h",  True)
+    bullish_15m = results.get("15m", True)
+
+    if bullish_1h and bullish_15m:
+        return True,  "🟢", "BTC Bullish (1h + 15m mbi EMA20)"
+    elif bullish_1h and not bullish_15m:
+        return False, "🟡", "BTC Kujdes (15m nën EMA20, 1h ok)"
+    else:
+        return False, "🔴", "BTC Bearish (nën EMA20) — nuk ka skanim"
+
+# ── BTC Emergency Monitor ─────────────────────────────────────────────────────
+_btc_price_last = None
+
+def monitor_btc_emergency():
+    """Nëse BTC bie >1% brenda 15 minutave dhe ka trade aktive → alarm urgjent."""
+    global _btc_price_last
+    while True:
+        try:
+            price = get_price("BTCUSDT")
+            if _btc_price_last is not None and active_trades:
+                drop_pct = (_btc_price_last - price) / _btc_price_last * 100
+                if drop_pct >= 1.0:
+                    trades_list = ", ".join(s.replace("USDT","") for s in active_trades)
+                    send(
+                        f"🚨 <b>BTC po bie!</b>\n"
+                        f"Rënie: <b>{round(drop_pct,2)}%</b> brenda 15 minutave\n"
+                        f"Çmimi: ${round(price,2)}\n\n"
+                        f"Trade aktive: <b>{trades_list}</b>\n"
+                        f"Kontrollo pozicionet tua menjëherë!"
+                    )
+            _btc_price_last = price
+        except: pass
+        time.sleep(900)  # çdo 15 minuta
+
 # ── Alarm Persistenz ──────────────────────────────────────────────────────────
 def save_alarms():
     data = {sym: {"entry": v["entry"], "sl": v["sl"], "tp": v["tp"]}
@@ -346,6 +396,12 @@ def monitor_sl_width():
     """Çdo 20 min kontrollon nëse ndonjë coin ka ngadalësuar pranë EMA20."""
     while True:
         try:
+            # BTC Boss Filtër — nëse bearish, nuk kontrollon altcoins
+            btc_ok, btc_emoji, btc_desc = get_btc_status()
+            if not btc_ok:
+                time.sleep(1200)
+                continue
+
             for sym in SYMBOLS:
                 coin = sym.replace("USDT","")
                 try:
@@ -427,21 +483,34 @@ SCAN_SCHEDULE = [
 ]
 
 def cmd_scan_typed(scan_type):
-    """Scan mit unterschiedlichem Prefix je nach Tageszeit."""
-    send("Scanne 15 Coins... bitte warten.")
+    """Scan me filtër BTC Boss dhe prefix sipas orës."""
+    send("Duke skanuar... prit.")
+
+    # ── BTC Boss Filtër ───────────────────────────────────────────────────────
+    btc_ok, btc_emoji, btc_desc = get_btc_status()
 
     if scan_type == "fruehwarnung":
-        prefix = "FRÜHWARNUNG 16:00 — noch nicht einsteigen!\nBeobachte diese Coins für 17:30:"
-        hint   = "Nächster Check: 17:30 für finale Signale."
+        prefix = "⚠️ PARALAJMËRIM 16:00 — mos hyr ende!\nVëzhgo këta coins për 17:30:"
+        hint   = "Kontrolli tjetër: 17:30 për sinjal final."
     elif scan_type == "signal":
-        prefix = "SIGNAL 17:30 — Setup bestätigt:"
-        hint   = "Alarm setzen wenn Setup passt: /alarm COIN entry sl tp"
+        prefix = "✅ SINJAL 17:30 — Setup i konfirmuar:"
+        hint   = "Vendos alarmin: /alarm COIN entry sl tp"
     else:
-        prefix = "MORGEN-SCAN 09:00:"
-        hint   = "Nächste Scans: 16:00 (Frühwarnung) & 17:30 (Signal)"
+        prefix = "🌅 SKAN MËNGJESIT 09:00:"
+        hint   = "Skanet tjera: 16:00 (paralajmërim) & 17:30 (sinjal)"
+
+    # Nëse BTC Bearish → nuk skanojmë altcoins
+    if not btc_ok:
+        send(
+            f"{btc_emoji} <b>{btc_desc}</b>\n"
+            f"{'─'*28}\n"
+            f"Boti nuk skanon altcoins kur BTC është bearish.\n"
+            f"Prit që BTC të kthehet mbi EMA20 dhe provo sërish."
+        )
+        return
 
     results  = {"setup": [], "watch": [], "no": []}
-    vol_rank = []  # für "Bester Kandidat" beim 17:30 Scan
+    vol_rank = []  # për "Bester Kandidat" 17:30
 
     for sym in SYMBOLS:
         coin = sym.replace("USDT","")
@@ -491,7 +560,7 @@ def cmd_scan_typed(scan_type):
         except:
             results["no"].append(f"{coin} (Fehler)")
 
-    msg = f"<b>{prefix}</b>\n{'─'*28}\n\n"
+    msg = f"{btc_emoji} <b>{btc_desc}</b>\n<b>{prefix}</b>\n{'─'*28}\n\n"
     if results["setup"]:
         msg += "SETUPS:\n" + "\n\n".join(results["setup"]) + "\n\n"
     if results["watch"]:
@@ -549,6 +618,7 @@ def main():
 
     threading.Thread(target=run_auto_scan_loop, daemon=True).start()
     threading.Thread(target=monitor_sl_width, daemon=True).start()
+    threading.Thread(target=monitor_btc_emergency, daemon=True).start()
 
     send("Bot gestartet! Schreib /hilfe um alle Befehle zu sehen.")
     print("[Bot] Läuft. Strg+C zum Beenden.", flush=True)
