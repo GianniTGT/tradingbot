@@ -2,7 +2,7 @@
 Auto-Scan: läuft täglich via Windows Task Scheduler
 Sendet EMA20 Scan-Ergebnis direkt per Telegram
 """
-import html, json, os, time, hmac, hashlib, requests
+import html, json, os, sys, time, hmac, hashlib, requests
 from datetime import datetime
 
 TOKEN   = os.environ.get("TELEGRAM_TOKEN")
@@ -153,7 +153,7 @@ msg += f"<b>Funding:</b> {fund_msg}\n"
 if skip_today:
     msg += "Kein Trade heute — NEWS-TAG!"
     send(msg)
-    exit()
+    sys.exit()
 
 if setups:
     msg += f"<b>SETUPS ({len(setups)})</b>\n"

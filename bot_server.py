@@ -29,11 +29,13 @@ if not TOKEN or not CHAT_ID:
             cfg = json.load(f)
         TOKEN   = cfg["bot_token"]
         CHAT_ID = cfg["chat_id"]
-    except:
+    except Exception:
         raise RuntimeError("Kein TELEGRAM_TOKEN / TELEGRAM_CHAT_ID gesetzt.")
 
 ALARMS_FILE = os.environ.get("ALARMS_FILE", os.path.join(os.path.dirname(__file__), "alarms.json"))
 INBOX_FILE  = os.environ.get("INBOX_FILE",  os.path.join(os.path.dirname(__file__), "alarm_inbox.json"))
+
+CHAT_ID = str(CHAT_ID)  # normalise to str regardless of JSON int vs env string
 
 SYMBOLS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","LINKUSDT",
            "NEARUSDT","AVAXUSDT","MAGICUSDT","DOTUSDT","ADAUSDT","XRPUSDT",
@@ -44,6 +46,8 @@ active_alerts = {}  # { "SOLUSDT": {"entry":..,"sl":..,"tp":..,"thread":..} }
 active_trades = {}  # { "SOLUSDT": {"entry":..,"sl":..,"tp":..,"thread":..} }
 _lock = threading.Lock()
 POSITION_SIZE = float(os.environ.get("POSITION_SIZE", "0"))
+if not POSITION_SIZE:
+    print("[Bot] Hinweis: POSITION_SIZE nicht gesetzt — PnL-Berechnung deaktiviert.", flush=True)
 offset = 0
 
 # ── Alarm Persistenz ──────────────────────────────────────────────────────────
@@ -116,7 +120,7 @@ def get_updates(offset):
 
 # ── Binance Helfer ────────────────────────────────────────────────────────────
 def get_price(symbol):
-    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+    url = "https://api.binance.com/api/v3/ticker/price?" + urlencode({"symbol": symbol})
     with urlopen(url, timeout=5) as r:
         return float(json.loads(r.read())["price"])
 
@@ -487,7 +491,7 @@ def maybe_run_scheduled_scans():
     day_key     = now.strftime("%Y-%m-%d")
 
     for h, m, scan_type in SCAN_SCHEDULE:
-        key = f"{day_key}_{h}"
+        key = f"{day_key}_{h}:{m}"
         if cest_hour == h and cest_minute < 3 and key not in _scans_done:
             _scans_done.add(key)
             threading.Thread(target=cmd_scan_typed, args=(scan_type,), daemon=True).start()

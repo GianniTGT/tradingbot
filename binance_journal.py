@@ -16,10 +16,13 @@ API_KEY    = _os.environ.get("BINANCE_API_KEY")
 API_SECRET = _os.environ.get("BINANCE_API_SECRET")
 
 if not API_KEY or not API_SECRET:
-    with open(_os.path.join(_os.path.dirname(__file__), "binance_config.json")) as f:
-        cfg = json.load(f)
-    API_KEY    = cfg["api_key"]
-    API_SECRET = cfg["api_secret"]
+    try:
+        with open(_os.path.join(_os.path.dirname(__file__), "binance_config.json")) as f:
+            cfg = json.load(f)
+        API_KEY    = cfg["api_key"]
+        API_SECRET = cfg["api_secret"]
+    except Exception:
+        raise RuntimeError("Kein BINANCE_API_KEY / BINANCE_API_SECRET gesetzt.")
 
 SYMBOLS = [
     "BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","LINKUSDT",
