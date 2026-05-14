@@ -37,7 +37,8 @@ INBOX_FILE  = os.environ.get("INBOX_FILE",  os.path.join(os.path.dirname(__file_
 
 SYMBOLS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","LINKUSDT",
            "NEARUSDT","AVAXUSDT","MAGICUSDT","DOTUSDT","ADAUSDT","XRPUSDT",
-           "SUIUSDT","INJUSDT","APTUSDT","ARBUSDT"]
+           "SUIUSDT","INJUSDT","APTUSDT","ARBUSDT",
+           "MATICUSDT","OPUSDT","DOGEUSDT","ATOMUSDT","LTCUSDT"]
 
 active_alerts = {}  # { "SOLUSDT": {"entry":..,"sl":..,"tp":..,"thread":..} }
 active_trades = {}  # { "SOLUSDT": {"entry":..,"sl":..,"tp":..,"thread":..} }
@@ -353,21 +354,102 @@ def check_inbox():
                 start_alarm_thread(coin, sym, info["entry"], info.get("sl"), info.get("tp"))
     except: pass
 
-# ── Täglicher Auto-Scan (09:00 Lokalzeit / CEST) ─────────────────────────────
-_last_scan_day = None
+# ── Automatische Scans (09:00 / 16:00 / 17:30 UTC+2 CEST) ───────────────────
+_scans_done = set()  # z.B. {"2026-05-15_09", "2026-05-15_16", "2026-05-15_17"}
 
-def maybe_run_daily_scan():
-    global _last_scan_day
-    now = datetime.now()
-    if now.hour == 9 and now.minute < 2 and now.day != _last_scan_day:
-        _last_scan_day = now.day
-        threading.Thread(target=cmd_scan, daemon=True).start()
+SCAN_SCHEDULE = [
+    (9,  0,  "morgen"),
+    (16, 0,  "fruehwarnung"),
+    (17, 30, "signal"),
+]
+
+def cmd_scan_typed(scan_type):
+    """Scan mit unterschiedlichem Prefix je nach Tageszeit."""
+    send("Scanne 15 Coins... bitte warten.")
+
+    if scan_type == "fruehwarnung":
+        prefix = "FRÜHWARNUNG 16:00 — noch nicht einsteigen!\nBeobachte diese Coins für 17:30:"
+        hint   = "Nächster Check: 17:30 für finale Signale."
+    elif scan_type == "signal":
+        prefix = "SIGNAL 17:30 — Setup bestätigt:"
+        hint   = "Alarm setzen wenn Setup passt: /alarm COIN entry sl tp"
+    else:
+        prefix = "MORGEN-SCAN 09:00:"
+        hint   = "Nächste Scans: 16:00 (Frühwarnung) & 17:30 (Signal)"
+
+    results = {"setup": [], "watch": [], "no": []}
+
+    for sym in SYMBOLS:
+        coin = sym.replace("USDT","")
+        try:
+            url4 = f"https://api.binance.com/api/v3/klines?symbol={sym}&interval=4h&limit=50"
+            urld = f"https://api.binance.com/api/v3/klines?symbol={sym}&interval=1d&limit=25"
+            with urlopen(url4, timeout=8) as r: d4 = json.loads(r.read())
+            with urlopen(urld, timeout=8) as r: dd = json.loads(r.read())
+
+            c4 = [float(k[4]) for k in d4]
+            o4 = [float(k[1]) for k in d4]
+            l4 = [float(k[3]) for k in d4]
+            h4 = [float(k[2]) for k in d4]
+            cd = [float(k[4]) for k in dd]
+
+            ema4h = get_ema(c4); ema4h_prev = get_ema(c4[:-3])
+            emad  = get_ema(cd)
+
+            trend4 = ema4h > ema4h_prev
+            trendd = cd[-1] > emad
+            zone   = ema4h * 0.005
+            inZone = l4[-1] <= ema4h+zone and h4[-1] >= ema4h-zone
+            bounce = inZone and c4[-1] > ema4h and c4[-1] > o4[-1]
+            dist   = round((c4[-1]-ema4h)/ema4h*100, 2)
+
+            if trend4 and trendd and bounce:
+                entry  = round_price(c4[-1])
+                sl     = round_price(min(l4[-2]*0.999, ema4h*0.997))
+                rpt    = entry - sl
+                slpct  = round(rpt/entry*100, 2)
+                if slpct <= 1.5:
+                    tp = round_price(entry + rpt*2)
+                    results["setup"].append(
+                        f"<b>{coin}</b> LONG\nEntry: ${entry} | SL: ${sl} (-{slpct}%) | TP: ${tp}\n"
+                        f"/alarm {coin} {entry} {sl} {tp}"
+                    )
+            elif trend4 and trendd and inZone:
+                results["watch"].append(f"{coin} ({dist:+.2f}%)")
+            else:
+                r = "Daily bear" if not trendd else "4h bear" if not trend4 else "kein PB"
+                results["no"].append(f"{coin} ({r})")
+        except:
+            results["no"].append(f"{coin} (Fehler)")
+
+    msg = f"<b>{prefix}</b>\n{'─'*28}\n\n"
+    if results["setup"]:
+        msg += "SETUPS:\n" + "\n\n".join(results["setup"]) + "\n\n"
+    if results["watch"]:
+        msg += "BEOBACHTEN:\n" + " | ".join(results["watch"]) + "\n\n"
+    if not results["setup"] and not results["watch"]:
+        msg += "Keine Setups. Markt abwarten.\n\n"
+    msg += f"<i>{hint}</i>"
+    send(msg)
+
+def maybe_run_scheduled_scans():
+    global _scans_done
+    now = datetime.utcnow()
+    # CEST = UTC+2
+    cest_hour   = (now.hour + 2) % 24
+    cest_minute = now.minute
+    day_key     = now.strftime("%Y-%m-%d")
+
+    for h, m, scan_type in SCAN_SCHEDULE:
+        key = f"{day_key}_{h}"
+        if cest_hour == h and cest_minute < 3 and key not in _scans_done:
+            _scans_done.add(key)
+            threading.Thread(target=cmd_scan_typed, args=(scan_type,), daemon=True).start()
 
 def run_auto_scan_loop():
-    """Prüft jede Minute ob ein täglicher Scan fällig ist."""
     while True:
         try:
-            maybe_run_daily_scan()
+            maybe_run_scheduled_scans()
         except: pass
         time.sleep(60)
 
@@ -410,7 +492,7 @@ def main():
                 print(f"[Bot] Befehl: {text}", flush=True)
 
                 if cmd == "/hilfe":          cmd_hilfe()
-                elif cmd == "/scan":         threading.Thread(target=cmd_scan, daemon=True).start()
+                elif cmd == "/scan":         threading.Thread(target=cmd_scan_typed, args=("morgen",), daemon=True).start()
                 elif cmd == "/price":        cmd_price(parts)
                 elif cmd == "/alarm":        cmd_alarm(parts)
                 elif cmd == "/alarme":       cmd_alarme()
