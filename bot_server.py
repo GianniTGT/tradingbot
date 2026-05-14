@@ -339,6 +339,69 @@ def cmd_stoptrade(parts):
     else:
         send(f"Kein laufender Trade für {coin}.")
 
+# ── SL Monitor: njofton kur SL < 1.5% pranë EMA20 ───────────────────────────
+_sl_alerted = {}  # { "BNBUSDT": "2026-05-15_candle_timestamp" }
+
+def monitor_sl_width():
+    """Çdo 20 min kontrollon nëse ndonjë coin ka ngadalësuar pranë EMA20."""
+    while True:
+        try:
+            for sym in SYMBOLS:
+                coin = sym.replace("USDT","")
+                try:
+                    url4 = f"https://api.binance.com/api/v3/klines?symbol={sym}&interval=4h&limit=50"
+                    urld = f"https://api.binance.com/api/v3/klines?symbol={sym}&interval=1d&limit=25"
+                    with urlopen(url4, timeout=8) as r: d4 = json.loads(r.read())
+                    with urlopen(urld, timeout=8) as r: dd = json.loads(r.read())
+
+                    c4 = [float(k[4]) for k in d4]
+                    o4 = [float(k[1]) for k in d4]
+                    l4 = [float(k[3]) for k in d4]
+                    h4 = [float(k[2]) for k in d4]
+                    cd = [float(k[4]) for k in dd]
+
+                    candle_ts = str(d4[-1][0])  # timestamp kandela aktuale
+
+                    ema4h      = get_ema(c4)
+                    ema4h_prev = get_ema(c4[:-3])
+                    emad       = get_ema(cd)
+
+                    trend4  = ema4h > ema4h_prev
+                    trendd  = cd[-1] > emad
+                    zone    = ema4h * 0.005
+                    inZone  = l4[-1] <= ema4h + zone and h4[-1] >= ema4h - zone
+                    bounce  = inZone and c4[-1] > ema4h and c4[-1] > o4[-1]
+
+                    if not (trend4 and trendd and (inZone or bounce)):
+                        continue
+
+                    entry   = round_price(c4[-1])
+                    sl      = round_price(min(l4[-2] * 0.999, ema4h * 0.997))
+                    risk_pt = entry - sl
+                    sl_pct  = round(risk_pt / entry * 100, 2)
+
+                    # Vetëm nëse SL < 1.5% dhe nuk kemi njoftuar tashmë për këtë kandelë
+                    alert_key = f"{sym}_{candle_ts}"
+                    if sl_pct <= 1.5 and _sl_alerted.get(sym) != alert_key:
+                        _sl_alerted[sym] = alert_key
+                        tp     = round_price(entry + risk_pt * 2)
+                        tp_pct = round(risk_pt * 2 / entry * 100, 2)
+                        status = "✅ Bounce konfirmuar" if bounce else "👀 Në zonë, pret bounce"
+                        send(
+                            f"📉➡️📈 <b>{coin} ka ngadalësuar pranë EMA20!</b>\n"
+                            f"{'─'*28}\n"
+                            f"SL: <b>{sl_pct}%</b> — brenda kufirit 1.5% ✅\n"
+                            f"Status: {status}\n\n"
+                            f"Entry: ${entry}\n"
+                            f"Stop Loss: ${sl}  (-{sl_pct}%)\n"
+                            f"Take Profit: ${tp}  (+{tp_pct}%)  [2:1]\n\n"
+                            f"/alarm {coin} {entry} {sl} {tp}"
+                        )
+                except:
+                    continue
+        except: pass
+        time.sleep(1200)  # kontrollo çdo 20 minuta
+
 # ── Haupt-Loop ────────────────────────────────────────────────────────────────
 def check_inbox():
     """Liest alarm_inbox.json und startet neue Alarm-Threads."""
@@ -485,6 +548,7 @@ def main():
         except: pass
 
     threading.Thread(target=run_auto_scan_loop, daemon=True).start()
+    threading.Thread(target=monitor_sl_width, daemon=True).start()
 
     send("Bot gestartet! Schreib /hilfe um alle Befehle zu sehen.")
     print("[Bot] Läuft. Strg+C zum Beenden.", flush=True)
