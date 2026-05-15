@@ -12,11 +12,17 @@ Befehle die du im Telegram schreiben kannst:
   /stoptrade SOL  — Trade-Überwachung stoppen
   /hilfe          — Diese Liste anzeigen
 """
-import json, time, threading, os
+import json, time, threading, os, io
 from urllib.request import urlopen, Request
 from urllib.parse import urlencode
 from urllib.error import URLError
 from datetime import datetime
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import mplfinance as mpf
+import pandas as pd
+import requests as _req
 
 # Env-Variablen (Railway) haben Vorrang vor lokalen Config-Dateien
 TOKEN   = os.environ.get("TELEGRAM_TOKEN")
@@ -337,6 +343,60 @@ def check_inbox():
             start_alarm_thread(coin, sym, entry, sl, tp)
     except Exception: pass
 
+# ── Chart Generation ─────────────────────────────────────────────────────────
+def generate_chart(sym, raw_candles, entry, sl, tp):
+    """Gjeneron PNG 4h candlestick me EMA20 + nivelet entry/SL/TP."""
+    candles = raw_candles[-60:]
+    times = [pd.Timestamp(int(k[0]), unit='ms') for k in candles]
+    df = pd.DataFrame({
+        'Open':   [float(k[1]) for k in candles],
+        'High':   [float(k[2]) for k in candles],
+        'Low':    [float(k[3]) for k in candles],
+        'Close':  [float(k[4]) for k in candles],
+        'Volume': [float(k[5]) for k in candles],
+    }, index=pd.DatetimeIndex(times))
+
+    # EMA20 për çdo kandelë
+    all_closes = [float(k[4]) for k in raw_candles]
+    k_m, e = 2 / 21, all_closes[0]
+    all_emas = []
+    for c in all_closes:
+        e = c * k_m + e * (1 - k_m)
+        all_emas.append(e)
+    ema_series = pd.Series(all_emas[-60:], index=pd.DatetimeIndex(times))
+
+    ap = [mpf.make_addplot(ema_series, color='cyan', width=1.5)]
+    hl = dict(
+        hlines=[entry, sl, tp],
+        colors=['#3399ff', '#ff4444', '#00cc44'],
+        linewidths=[1.2, 1.2, 1.2],
+        linestyle='--'
+    )
+    buf = io.BytesIO()
+    fig, _ = mpf.plot(
+        df, type='candle', style='nightclouds',
+        addplot=ap, hlines=hl,
+        title=f'\n{sym} – 4h  |  Entry ${entry}  SL ${sl}  TP ${tp}',
+        figsize=(12, 7), returnfig=True
+    )
+    fig.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#131722')
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+def send_photo(buf, caption=""):
+    """Dërgon foto në Telegram."""
+    url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+    try:
+        _req.post(
+            url,
+            data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "HTML"},
+            files={"photo": ("chart.png", buf, "image/png")},
+            timeout=30
+        )
+    except Exception:
+        send(caption)  # fallback: dërgo vetëm tekstin
+
 # ── BTC Gatekeeper + Unified Scan ────────────────────────────────────────────
 _last_auto_scan = 0.0
 
@@ -380,7 +440,7 @@ def do_scan(triggered_by_command=False):
         coin = sym.replace("USDT", "")
         try:
             url4 = "https://api.binance.com/api/v3/klines?" + urlencode(
-                {"symbol": sym, "interval": "4h", "limit": 50})
+                {"symbol": sym, "interval": "4h", "limit": 60})
             urld = "https://api.binance.com/api/v3/klines?" + urlencode(
                 {"symbol": sym, "interval": "1d", "limit": 25})
             with urlopen(url4, timeout=8) as r: d4 = json.loads(r.read())
@@ -390,6 +450,7 @@ def do_scan(triggered_by_command=False):
             o4 = [float(k[1]) for k in d4]
             l4 = [float(k[3]) for k in d4]
             h4 = [float(k[2]) for k in d4]
+            v4 = [float(k[5]) for k in d4]
             cd = [float(k[4]) for k in dd]
 
             ema4h      = get_ema(c4)
@@ -407,15 +468,33 @@ def do_scan(triggered_by_command=False):
                 entry = round_price(c4[-1])
                 sl    = round_price(min(l4[-2] * 0.999, ema4h * 0.997))
                 rpt   = entry - sl
+
+                # ── Filtrat e cilësisë (boti "sheh" chartin) ──────────────
+                # 1. SL duhet të jetë nën EMA20 — jo mbi të
+                if sl >= ema4h:
+                    continue
+                # 2. Trupi i kandelës bounce duhet të jetë bullish i qartë
+                #    (trupi ≥ 30% e rangut të kandelës)
+                candle_range = h4[-1] - l4[-1]
+                body_ratio   = (c4[-1] - o4[-1]) / candle_range if candle_range > 0 else 0
+                if body_ratio < 0.3:
+                    continue
+                # 3. Volumi i bounce-it të mos jetë shumë i dobët
+                vol_avg = sum(v4[:-1]) / len(v4[:-1])
+                if v4[-1] < vol_avg * 0.6:
+                    continue
+                # ─────────────────────────────────────────────────────────
+
                 slpct = round(rpt / entry * 100, 2)
                 if slpct <= 1.5:
                     tp    = round_price(entry + rpt * 2)
                     tppct = round(rpt * 2 / entry * 100, 2)
-                    setups.append(
-                        f"<b>{coin}</b> LONG\n"
-                        f"Entry: ${entry}  |  SL: ${sl} (-{slpct}%)  |  TP: ${tp} (+{tppct}%)\n"
-                        f"/alarm {coin} {entry} {sl} {tp}"
-                    )
+                    chart = generate_chart(sym, d4, entry, sl, tp)
+                    setups.append({
+                        "coin": coin, "entry": entry, "sl": sl, "tp": tp,
+                        "slpct": slpct, "tppct": tppct, "chart": chart
+                    })
+
             elif trend4 and trendd and inZone:
                 watch.append(f"{coin} ({dist:+.2f}%)")
 
@@ -424,15 +503,20 @@ def do_scan(triggered_by_command=False):
 
     now = datetime.now().strftime("%H:%M")
     if setups:
-        msg  = f"<b>EMA20 Scan — {now}  |  BTC ✅</b>\n{'─'*28}\n\n"
-        msg += "\n\n".join(setups)
+        for s in setups:
+            caption = (
+                f"<b>{s['coin']} LONG  |  BTC ✅  |  {now}</b>\n"
+                f"Entry: ${s['entry']}  |  SL: ${s['sl']} (-{s['slpct']}%)  |  TP: ${s['tp']} (+{s['tppct']}%)\n"
+                f"/alarm {s['coin']} {s['entry']} {s['sl']} {s['tp']}"
+            )
+            send_photo(s["chart"], caption=caption)
         if watch:
-            msg += f"\n\n👀 <i>Afër EMA20: {' | '.join(watch)}</i>"
+            send(f"👀 <i>Afër EMA20: {' | '.join(watch)}</i>")
     else:
         msg = f"<b>EMA20 Scan — {now}  |  BTC ✅</b>\nAktualisht asnjë setup i mirë."
         if watch:
             msg += f"\n👀 Afër EMA20: {' | '.join(watch)}"
-    send(msg)
+        send(msg)
 
 def run_auto_scan_loop():
     global _last_auto_scan
