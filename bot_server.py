@@ -582,8 +582,9 @@ def fetch_etf_flows():
             timeout=10
         )
         data = resp.json()
+        print(f"[Coinglass ETF] status={resp.status_code} code={data.get('code')} msg={data.get('msg')} data_len={len(data.get('data') or [])}", flush=True)
         if data.get("code") != "0" or not data.get("data"):
-            return "ETF flows: të dhënat nuk janë të disponueshme.\n"
+            return f"ETF flows: {data.get('msg', 'pa të dhëna')} (code {data.get('code')}).\n"
         rows   = data["data"]
         recent = rows[:3]  # 3 ditët e fundit
         lines  = ["<b>BTC ETF Flows (mln USD):</b>"]
