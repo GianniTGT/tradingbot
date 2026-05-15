@@ -16,7 +16,11 @@ import json, time, threading, os, io
 from urllib.request import urlopen, Request
 from urllib.parse import urlencode
 from urllib.error import URLError
-from datetime import datetime
+from datetime import datetime, timedelta
+
+CEST = timedelta(hours=2)
+def now_cest():
+    return (datetime.utcnow() + CEST).strftime("%H:%M")
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -265,7 +269,7 @@ def cmd_scan():
         except:
             results["no"].append(f"{coin} (gabim)")
 
-    msg = f"{btc_emoji} <b>{btc_desc}</b>\n<b>SKAN EMA20 — {datetime.now().strftime('%H:%M')}</b>\n\n"
+    msg = f"{btc_emoji} <b>{btc_desc}</b>\n<b>SKAN EMA20 — {now_cest()}</b>\n\n"
     if results["setup"]:
         msg += "✅ SETUP:\n" + "\n\n".join(results["setup"]) + "\n\n"
     if results["watch"]:
@@ -542,7 +546,7 @@ def do_scan(triggered_by_command=False):
         except Exception:
             pass
 
-    now = datetime.now().strftime("%H:%M")
+    now = now_cest()
     if setups:
         for s in setups:
             caption = (f"<b>{s['coin']} LONG  |  BTC ✅  |  {now}</b>\n"
