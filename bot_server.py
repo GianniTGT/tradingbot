@@ -571,38 +571,30 @@ def do_scan(triggered_by_command=False):
 # ── Morning Briefing (09:00 CEST) ────────────────────────────────────────────
 _briefing_done = set()  # dedup per day: {"2026-05-15"}
 
-def fetch_etf_flows():
-    """Merr BTC ETF net flows nga Coinglass. Kthen tekst të formatuar."""
-    if not COINGLASS_KEY:
-        return "ETF flows: COINGLASS_API_KEY nuk është vendosur.\n"
+def fetch_market_sentiment():
+    """Fear & Greed Index + BTC Dominance — falas, pa API key."""
+    lines = []
+    # Fear & Greed
     try:
-        resp = _req.get(
-            "https://open-api.coinglass.com/public/v2/etf/bitcoin_etf_flow_all_list",
-            headers={"coinglassSecret": COINGLASS_KEY},
-            timeout=10
-        )
-        raw  = resp.text[:600]
-        data = resp.json()
-        print(f"[Coinglass ETF] status={resp.status_code} raw={raw}", flush=True)
-        # support both {"code":"0",...} and {"success":true,...}
-        ok = (data.get("code") == "0") or (data.get("success") is True)
-        rows = data.get("data") or []
-        if not ok or not rows:
-            return f"ETF flows: {data.get('msg', raw[:120])}.\n"
-        rows   = data["data"]
-        recent = rows[:3]  # 3 ditët e fundit
-        lines  = ["<b>BTC ETF Flows (mln USD):</b>"]
-        for row in recent:
-            date  = row.get("date", "?")
-            total = float(row.get("total", 0))
-            sign  = "🟢 +" if total > 0 else ("🔴 " if total < 0 else "⚪ ")
-            lines.append(f"  {date}: {sign}{total:.1f}M")
-        total_3d = sum(float(r.get("total", 0)) for r in recent)
-        sign_3d  = "🟢 +" if total_3d > 0 else "🔴 "
-        lines.append(f"  3-ditore: {sign_3d}{total_3d:.1f}M")
-        return "\n".join(lines) + "\n"
-    except Exception as e:
-        return f"ETF flows: gabim ({e})\n"
+        d = _req.get("https://api.alternative.me/fng/?limit=1", timeout=8).json()
+        fng = d["data"][0]
+        val   = int(fng["value"])
+        label = fng["value_classification"]
+        if val >= 75:   emoji = "🟢"
+        elif val >= 55: emoji = "🟡"
+        elif val >= 30: emoji = "🟠"
+        else:           emoji = "🔴"
+        lines.append(f"<b>Fear &amp; Greed:</b> {emoji} {val}/100 — <i>{label}</i>")
+    except Exception:
+        pass
+    # BTC Dominance
+    try:
+        d = _req.get("https://api.coingecko.com/api/v3/global", timeout=8).json()
+        dom = round(d["data"]["market_cap_percentage"]["btc"], 1)
+        lines.append(f"<b>BTC Dominance:</b> {dom}%")
+    except Exception:
+        pass
+    return "\n".join(lines) + "\n" if lines else ""
 
 
 def fetch_liquidation_summary():
@@ -672,12 +664,12 @@ def morning_briefing(force=False):
     print(f"[Briefing] Starting morning briefing {day}", flush=True)
     send(f"☕ <b>BRIEFING MËNGJESI — {day}  09:00 CEST</b>\nDuke mbledhur të dhënat...")
 
-    etf_text  = fetch_etf_flows()
-    liq_text  = fetch_liquidation_summary()
-    news_text = fetch_news_today()
+    sentiment_text = fetch_market_sentiment()
+    liq_text       = fetch_liquidation_summary()
+    news_text      = fetch_news_today()
 
     briefing = (f"☀️ <b>BRIEFING {day}</b>\n{'─'*28}\n\n"
-                f"{etf_text}\n{liq_text}\n{news_text}")
+                f"{sentiment_text}\n{liq_text}\n{news_text}")
     send(briefing)
 
     send("🔍 Duke skanuar setups për sot...")
