@@ -524,16 +524,13 @@ def scan_stocks():
             no.append(f"{ticker} (gabim)")
 
     now = now_cest()
+    # Dërgo vetëm nëse ka setup — heshtje totale nëse jo
+    if not setups:
+        return
+    now = now_cest()
     msg = (f"📈 <b>PLAN B — AKSIONE  |  {now}</b>\n"
-           f"<i>Kripto në pritje (BTC Bearish)</i>\n{'─'*28}\n\n")
-    if setups:
-        msg += "✅ <b>SETUP:</b>\n" + "\n\n".join(setups) + "\n\n"
-    if watch:
-        msg += "👀 <b>Afër EMA20:</b> " + " | ".join(watch) + "\n\n"
-    if not setups and not watch:
-        msg += "Asnjë setup aksionesh tani. Prit.\n\n"
-    if no:
-        msg += "❌ Pa setup: " + " | ".join(no)
+           f"<i>Kripto në pritje (BTC Bearish)</i>\n{'─'*28}\n\n"
+           f"✅ <b>SETUP:</b>\n" + "\n\n".join(setups))
     send(msg)
 
 
@@ -564,19 +561,20 @@ def do_scan(triggered_by_command=False):
         return
 
     if not (bull_4h and bull_d):
-        tick_4h = "✅" if bull_4h else "❌"
-        tick_d  = "✅" if bull_d  else "❌"
-        reason  = []
-        if not bull_d:  reason.append(f"Daily EMA20: ${round(emad,2)} — çmimi nën të")
-        if not bull_4h: reason.append(f"4h EMA20:    ${round(ema4h,2)} — çmimi nën të")
-        send(
-            f"🎯 <b>SNIPER — kripto në pritje</b>\n"
-            f"BTC: <b>${btc_price}</b>\n"
-            f"  Daily EMA20 {tick_d}  ${round(emad,2)}\n"
-            f"  4h EMA20    {tick_4h}  ${round(ema4h,2)}\n\n"
-            f"📋 {chr(10).join(reason)}\n\n"
-            f"<i>🏦 Kripto në pritje. Skanim i bursës (Stock Market) aktive...</i>"
-        )
+        if triggered_by_command:
+            tick_4h = "✅" if bull_4h else "❌"
+            tick_d  = "✅" if bull_d  else "❌"
+            reason  = []
+            if not bull_d:  reason.append(f"Daily EMA20: ${round(emad,2)} — çmimi nën të")
+            if not bull_4h: reason.append(f"4h EMA20:    ${round(ema4h,2)} — çmimi nën të")
+            send(
+                f"🎯 <b>SNIPER — kripto në pritje</b>\n"
+                f"BTC: <b>${btc_price}</b>\n"
+                f"  Daily EMA20 {tick_d}  ${round(emad,2)}\n"
+                f"  4h EMA20    {tick_4h}  ${round(ema4h,2)}\n\n"
+                f"📋 {chr(10).join(reason)}\n\n"
+                f"<i>🏦 Kripto në pritje. Skanim i bursës (Stock Market) aktive...</i>"
+            )
         scan_stocks()
         return
 
@@ -650,13 +648,12 @@ def do_scan(triggered_by_command=False):
                        f"|  TP: ${s['tp']} (+{s['tppct']}%)\n"
                        f"/alarm {s['coin']} {s['entry']} {s['sl']} {s['tp']}")
             send_photo(s["chart"], caption=caption)
-        if watch:
-            send(f"👀 <i>Afër EMA20: {' | '.join(watch)}</i>")
-    else:
-        msg = f"<b>Skan — {now}  |  BTC ✅</b>\nAktualisht asnjë setup i mirë."
+    elif triggered_by_command:
+        msg = f"🎯 <b>Skan — {now}  |  BTC ✅</b>\nAsnjë setup që plotëson 100% kushtet."
         if watch:
             msg += f"\n👀 Afër EMA20: {' | '.join(watch)}"
         send(msg)
+    # Nëse auto-scan dhe pa setup → heshtje totale
 
 # ── Morning Briefing (09:00 CEST) ────────────────────────────────────────────
 _briefing_done = set()  # dedup per day: {"2026-05-15"}
@@ -910,21 +907,18 @@ def cmd_scan_typed(scan_type):
         except:
             results["no"].append(f"{coin} (Fehler)")
 
+    # Heshtje totale nëse nuk ka setup
+    if not results["setup"]:
+        return
+
     msg = f"{btc_emoji} <b>{btc_desc}</b>\n<b>{prefix}</b>\n{'─'*28}\n\n"
-    if results["setup"]:
-        msg += "SETUPS:\n" + "\n\n".join(results["setup"]) + "\n\n"
-    if results["watch"]:
-        msg += "BEOBACHTEN:\n" + " | ".join(results["watch"]) + "\n\n"
-    if not results["setup"] and not results["watch"]:
-        msg += "Keine Setups. Markt abwarten.\n\n"
+    msg += "SETUPS:\n" + "\n\n".join(results["setup"]) + "\n\n"
 
     # Bester Kandidat nur beim 17:30 Signal-Scan
     if scan_type == "signal" and vol_rank:
         best = max(vol_rank, key=lambda x: x[1])
         coin_b, vol_b, typ_b = best
-        vol_str = f"{vol_b}x Durchschnitt"
-        flag    = "✅ Setup aktiv" if typ_b == "setup" else "👀 Afër EMA20, pret bounce"
-        msg += f"{'─'*28}\n🏆 <b>Bester Kandidat Abend-Trade: {coin_b}</b>\nVolumen letzte 4h: <b>{vol_str}</b> — {flag}\n{'─'*28}\n\n"
+        msg += f"{'─'*28}\n🏆 <b>Kandidati më i mirë: {coin_b}</b>\nVolumi: <b>{vol_b}x mesatare</b>\n{'─'*28}\n\n"
 
     msg += f"<i>{hint}</i>"
     send(msg)
