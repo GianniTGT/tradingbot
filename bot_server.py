@@ -12,11 +12,17 @@ Befehle die du im Telegram schreiben kannst:
   /stoptrade SOL  — Trade-Überwachung stoppen
   /hilfe          — Diese Liste anzeigen
 """
-import json, time, threading, os
+import json, time, threading, os, io
 from urllib.request import urlopen, Request
 from urllib.parse import urlencode
 from urllib.error import URLError
 from datetime import datetime
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import mplfinance as mpf
+import pandas as pd
+import requests as _req
 
 # Env-Variablen (Railway) haben Vorrang vor lokalen Config-Dateien
 TOKEN   = os.environ.get("TELEGRAM_TOKEN")
@@ -42,6 +48,11 @@ SYMBOLS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","LINKUSDT",
 
 active_alerts = {}  # { "SOLUSDT": {"entry":..,"sl":..,"tp":..,"thread":..} }
 active_trades = {}  # { "SOLUSDT": {"entry":..,"sl":..,"tp":..,"thread":..} }
+_lock = threading.Lock()
+POSITION_SIZE = float(os.environ.get("POSITION_SIZE", "0"))
+if not POSITION_SIZE:
+    print("[Bot] Hint: POSITION_SIZE not set — PnL calculation disabled.", flush=True)
+CHAT_ID = str(CHAT_ID) if CHAT_ID else CHAT_ID
 offset = 0
 
 # ── BTC Boss Filter ───────────────────────────────────────────────────────────
@@ -96,14 +107,13 @@ def monitor_btc_emergency():
 
 # ── Alarm Persistenz ──────────────────────────────────────────────────────────
 def save_alarms():
-    data = {sym: {"entry": v["entry"], "sl": v["sl"], "tp": v["tp"]}
-            for sym, v in active_alerts.items()}
+    with _lock:
+        data = {sym: {"entry": v["entry"], "sl": v["sl"], "tp": v["tp"]}
+                for sym, v in active_alerts.items()}
     with open(ALARMS_FILE, "w") as f:
         json.dump(data, f)
 
 def start_alarm_thread(coin, symbol, entry, sl, tp, notify=True):
-    if symbol in active_alerts:
-        return
     def monitor():
         if notify:
             if sl and tp:
@@ -131,15 +141,19 @@ def start_alarm_thread(coin, symbol, entry, sl, tp, notify=True):
                         time.sleep(60)
                         if symbol not in active_alerts: break
                         send(f"⏰ Kujtesë: <b>{coin}</b> te ${entry} — ende aktiv!")
-                    active_alerts.pop(symbol, None)
+                    with _lock:
+                        active_alerts.pop(symbol, None)
                     save_alarms()
                     break
                 last_price = price
                 time.sleep(20)
-            except: time.sleep(30)
+            except Exception: time.sleep(30)
 
-    t = threading.Thread(target=monitor, daemon=True)
-    active_alerts[symbol] = {"entry": entry, "sl": sl, "tp": tp, "thread": t}
+    with _lock:
+        if symbol in active_alerts:
+            return
+        t = threading.Thread(target=monitor, daemon=True)
+        active_alerts[symbol] = {"entry": entry, "sl": sl, "tp": tp, "thread": t}
     save_alarms()
     t.start()
 
@@ -161,7 +175,7 @@ def get_updates(offset):
 
 # ── Binance Helfer ────────────────────────────────────────────────────────────
 def get_price(symbol):
-    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+    url = "https://api.binance.com/api/v3/ticker/price?" + urlencode({"symbol": symbol})
     with urlopen(url, timeout=5) as r:
         return float(json.loads(r.read())["price"])
 
@@ -391,74 +405,171 @@ def cmd_stoptrade(parts):
     else:
         send(f"Nuk ka trade aktiv për {coin}.")
 
-# ── SL Monitor: njofton kur SL < 1.5% pranë EMA20 ───────────────────────────
-_sl_alerted = {}  # { "BNBUSDT": "2026-05-15_candle_timestamp" }
+# ── Chart + Scan me Filtër Cilësie ────────────────────────────────────────────
+_sl_alerted = {}
+
+def generate_chart(sym, raw_candles, entry, sl, tp):
+    """Gjeneron PNG 4h candlestick me EMA20 + nivelet entry/SL/TP."""
+    candles = raw_candles[-60:]
+    times   = [pd.Timestamp(int(k[0]), unit='ms') for k in candles]
+    df = pd.DataFrame({
+        'Open':   [float(k[1]) for k in candles],
+        'High':   [float(k[2]) for k in candles],
+        'Low':    [float(k[3]) for k in candles],
+        'Close':  [float(k[4]) for k in candles],
+        'Volume': [float(k[5]) for k in candles],
+    }, index=pd.DatetimeIndex(times))
+
+    all_closes = [float(k[4]) for k in raw_candles]
+    k_m, e = 2 / 21, all_closes[0]
+    all_emas = []
+    for c in all_closes:
+        e = c * k_m + e * (1 - k_m)
+        all_emas.append(e)
+    ema_s = pd.Series(all_emas[-60:], index=pd.DatetimeIndex(times))
+
+    ap = [mpf.make_addplot(ema_s, color='cyan', width=1.5)]
+    hl = dict(hlines=[entry, sl, tp],
+              colors=['#3399ff', '#ff4444', '#00cc44'],
+              linewidths=[1.2, 1.2, 1.2], linestyle='--')
+    buf = io.BytesIO()
+    fig, _ = mpf.plot(df, type='candle', style='nightclouds', addplot=ap, hlines=hl,
+                      title=f'\n{sym} – 4h  |  Entry ${entry}  SL ${sl}  TP ${tp}',
+                      figsize=(12, 7), returnfig=True)
+    fig.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#131722')
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+def send_photo(buf, caption=""):
+    """Dërgon foto në Telegram; fallback me tekst nëse dështon."""
+    url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+    try:
+        _req.post(url,
+                  data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "HTML"},
+                  files={"photo": ("chart.png", buf, "image/png")}, timeout=30)
+    except Exception:
+        send(caption)
+
+def do_scan(triggered_by_command=False):
+    """BTC 4h EMA20 gatekeeper → skanoj coins me filtër cilësie → chart."""
+    if triggered_by_command:
+        send("Duke skanuar... prit.")
+
+    # BTC 4h EMA20 kontrollo
+    try:
+        url4 = "https://api.binance.com/api/v3/klines?" + urlencode(
+            {"symbol": "BTCUSDT", "interval": "4h", "limit": 50})
+        with urlopen(url4, timeout=8) as r:
+            d4_btc = json.loads(r.read())
+        c4_btc    = [float(k[4]) for k in d4_btc]
+        ema_btc   = get_ema(c4_btc)
+        btc_price = round(c4_btc[-1], 2)
+        btc_ema   = round(ema_btc, 2)
+        btc_bull  = c4_btc[-1] > ema_btc
+    except Exception:
+        if triggered_by_command:
+            send("Gabim: nuk arrita të marr të dhënat e BTC.")
+        return
+
+    if not btc_bull:
+        send(
+            "Për momentin nuk ka setup-e të mira.\n"
+            f"BTC është nën EMA20 — ${btc_price} (EMA: ${btc_ema}) — Bearish.\n\n"
+            "Presim një ambient më të sigurt tregtar."
+        )
+        return
+
+    setups, watch = [], []
+
+    for sym in SYMBOLS:
+        if sym == "BTCUSDT":
+            continue
+        coin = sym.replace("USDT", "")
+        try:
+            url4 = "https://api.binance.com/api/v3/klines?" + urlencode(
+                {"symbol": sym, "interval": "4h", "limit": 60})
+            urld = "https://api.binance.com/api/v3/klines?" + urlencode(
+                {"symbol": sym, "interval": "1d", "limit": 25})
+            with urlopen(url4, timeout=8) as r: d4 = json.loads(r.read())
+            with urlopen(urld, timeout=8) as r: dd = json.loads(r.read())
+
+            c4 = [float(k[4]) for k in d4]
+            o4 = [float(k[1]) for k in d4]
+            l4 = [float(k[3]) for k in d4]
+            h4 = [float(k[2]) for k in d4]
+            v4 = [float(k[5]) for k in d4]
+            cd = [float(k[4]) for k in dd]
+
+            ema4h      = get_ema(c4)
+            ema4h_prev = get_ema(c4[:-3])
+            emad       = get_ema(cd)
+            candle_ts  = str(d4[-1][0])
+
+            trend4 = ema4h > ema4h_prev
+            trendd = cd[-1] > emad
+            zone   = ema4h * 0.005
+            inZone = l4[-1] <= ema4h + zone and h4[-1] >= ema4h - zone
+            bounce = inZone and c4[-1] > ema4h and c4[-1] > o4[-1]
+            dist   = round((c4[-1] - ema4h) / ema4h * 100, 2)
+
+            if trend4 and trendd and bounce:
+                entry = round_price(c4[-1])
+                sl    = round_price(min(l4[-2] * 0.999, ema4h * 0.997))
+                rpt   = entry - sl
+
+                # Filtrat e cilësisë
+                if sl >= ema4h: continue  # SL mbi EMA — setup i keq
+                candle_range = h4[-1] - l4[-1]
+                body_ratio   = (c4[-1] - o4[-1]) / candle_range if candle_range > 0 else 0
+                if body_ratio < 0.3: continue  # kandelë indecisive
+                vol_avg = sum(v4[:-1]) / len(v4[:-1])
+                if v4[-1] < vol_avg * 0.6: continue  # volum shumë i dobët
+
+                slpct     = round(rpt / entry * 100, 2)
+                alert_key = f"{sym}_{candle_ts}"
+                if slpct <= 1.5 and _sl_alerted.get(sym) != alert_key:
+                    _sl_alerted[sym] = alert_key
+                    tp    = round_price(entry + rpt * 2)
+                    tppct = round(rpt * 2 / entry * 100, 2)
+                    chart = generate_chart(sym, d4, entry, sl, tp)
+                    setups.append({"coin": coin, "entry": entry, "sl": sl, "tp": tp,
+                                   "slpct": slpct, "tppct": tppct, "chart": chart})
+
+            elif trend4 and trendd and inZone:
+                watch.append(f"{coin} ({dist:+.2f}%)")
+
+        except Exception:
+            pass
+
+    now = datetime.now().strftime("%H:%M")
+    if setups:
+        for s in setups:
+            caption = (f"<b>{s['coin']} LONG  |  BTC ✅  |  {now}</b>\n"
+                       f"Entry: ${s['entry']}  |  SL: ${s['sl']} (-{s['slpct']}%)  "
+                       f"|  TP: ${s['tp']} (+{s['tppct']}%)\n"
+                       f"/alarm {s['coin']} {s['entry']} {s['sl']} {s['tp']}")
+            send_photo(s["chart"], caption=caption)
+        if watch:
+            send(f"👀 <i>Afër EMA20: {' | '.join(watch)}</i>")
+    else:
+        msg = f"<b>Skan — {now}  |  BTC ✅</b>\nAktualisht asnjë setup i mirë."
+        if watch:
+            msg += f"\n👀 Afër EMA20: {' | '.join(watch)}"
+        send(msg)
+
+_last_auto_scan = 0.0
 
 def monitor_sl_width():
-    """Çdo 20 min kontrollon nëse ndonjë coin ka ngadalësuar pranë EMA20."""
+    """Çdo 20 min ekzekuton do_scan automatikisht."""
+    global _last_auto_scan
     while True:
         try:
-            # BTC Boss Filtër — nëse bearish, nuk kontrollon altcoins
-            btc_ok, btc_emoji, btc_desc = get_btc_status()
-            if not btc_ok:
-                time.sleep(1200)
-                continue
-
-            for sym in SYMBOLS:
-                coin = sym.replace("USDT","")
-                try:
-                    url4 = f"https://api.binance.com/api/v3/klines?symbol={sym}&interval=4h&limit=50"
-                    urld = f"https://api.binance.com/api/v3/klines?symbol={sym}&interval=1d&limit=25"
-                    with urlopen(url4, timeout=8) as r: d4 = json.loads(r.read())
-                    with urlopen(urld, timeout=8) as r: dd = json.loads(r.read())
-
-                    c4 = [float(k[4]) for k in d4]
-                    o4 = [float(k[1]) for k in d4]
-                    l4 = [float(k[3]) for k in d4]
-                    h4 = [float(k[2]) for k in d4]
-                    cd = [float(k[4]) for k in dd]
-
-                    candle_ts = str(d4[-1][0])  # timestamp kandela aktuale
-
-                    ema4h      = get_ema(c4)
-                    ema4h_prev = get_ema(c4[:-3])
-                    emad       = get_ema(cd)
-
-                    trend4  = ema4h > ema4h_prev
-                    trendd  = cd[-1] > emad
-                    zone    = ema4h * 0.005
-                    inZone  = l4[-1] <= ema4h + zone and h4[-1] >= ema4h - zone
-                    bounce  = inZone and c4[-1] > ema4h and c4[-1] > o4[-1]
-
-                    if not (trend4 and trendd and (inZone or bounce)):
-                        continue
-
-                    entry   = round_price(c4[-1])
-                    sl      = round_price(min(l4[-2] * 0.999, ema4h * 0.997))
-                    risk_pt = entry - sl
-                    sl_pct  = round(risk_pt / entry * 100, 2)
-
-                    # Vetëm nëse SL < 1.5% dhe nuk kemi njoftuar tashmë për këtë kandelë
-                    alert_key = f"{sym}_{candle_ts}"
-                    if sl_pct <= 1.5 and _sl_alerted.get(sym) != alert_key:
-                        _sl_alerted[sym] = alert_key
-                        tp     = round_price(entry + risk_pt * 2)
-                        tp_pct = round(risk_pt * 2 / entry * 100, 2)
-                        status = "✅ Bounce konfirmuar" if bounce else "👀 Në zonë, pret bounce"
-                        send(
-                            f"📉➡️📈 <b>{coin} ka ngadalësuar pranë EMA20!</b>\n"
-                            f"{'─'*28}\n"
-                            f"SL: <b>{sl_pct}%</b> — brenda kufirit 1.5% ✅\n"
-                            f"Status: {status}\n\n"
-                            f"Entry: ${entry}\n"
-                            f"Stop Loss: ${sl}  (-{sl_pct}%)\n"
-                            f"Take Profit: ${tp}  (+{tp_pct}%)  [2:1]\n\n"
-                            f"/alarm {coin} {entry} {sl} {tp}"
-                        )
-                except:
-                    continue
-        except: pass
-        time.sleep(1200)  # kontrollo çdo 20 minuta
+            if time.time() - _last_auto_scan >= 1200:
+                _last_auto_scan = time.time()
+                do_scan()
+        except Exception: pass
+        time.sleep(30)
 
 # ── Haupt-Loop ────────────────────────────────────────────────────────────────
 def check_inbox():
@@ -643,7 +754,7 @@ def main():
                 print(f"[Bot] Befehl: {text}", flush=True)
 
                 if cmd == "/hilfe":          cmd_hilfe()
-                elif cmd == "/scan":         threading.Thread(target=cmd_scan_typed, args=("morgen",), daemon=True).start()
+                elif cmd == "/scan":         threading.Thread(target=do_scan, args=(True,), daemon=True).start()
                 elif cmd == "/price":        cmd_price(parts)
                 elif cmd == "/alarm":        cmd_alarm(parts)
                 elif cmd == "/alarme":       cmd_alarme()
