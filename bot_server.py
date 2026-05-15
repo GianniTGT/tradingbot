@@ -50,7 +50,7 @@ SYMBOLS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","LINKUSDT",
            "SUIUSDT","INJUSDT","APTUSDT","ARBUSDT",
            "MATICUSDT","OPUSDT","DOGEUSDT","ATOMUSDT","LTCUSDT"]
 
-STOCK_SYMBOLS = ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL"]
+STOCK_SYMBOLS = ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL", "PG", "JNJ"]
 
 active_alerts = {}  # { "SOLUSDT": {"entry":..,"sl":..,"tp":..,"thread":..} }
 active_trades = {}  # { "SOLUSDT": {"entry":..,"sl":..,"tp":..,"thread":..} }
@@ -576,7 +576,7 @@ def do_scan(triggered_by_command=False):
             f"  Daily EMA20 {tick_d}  ${round(emad,2)}\n"
             f"  4h EMA20    {tick_4h}  ${round(ema4h,2)}\n\n"
             f"📋 {chr(10).join(reason)}\n\n"
-            f"<i>Duke skanuar aksionet si Plan B...</i>"
+            f"<i>🏦 Kripto në pritje. Skanim i bursës (Stock Market) aktive...</i>"
         )
         scan_stocks()
         return
