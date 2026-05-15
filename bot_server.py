@@ -50,6 +50,8 @@ SYMBOLS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","LINKUSDT",
            "SUIUSDT","INJUSDT","APTUSDT","ARBUSDT",
            "MATICUSDT","OPUSDT","DOGEUSDT","ATOMUSDT","LTCUSDT"]
 
+STOCK_SYMBOLS = ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL"]
+
 active_alerts = {}  # { "SOLUSDT": {"entry":..,"sl":..,"tp":..,"thread":..} }
 active_trades = {}  # { "SOLUSDT": {"entry":..,"sl":..,"tp":..,"thread":..} }
 _lock = threading.Lock()
@@ -461,6 +463,81 @@ def send_photo(buf, caption=""):
     except Exception:
         send(caption)
 
+def scan_stocks():
+    """Plan B: EMA20 Pullback Daily në aksione tech — thirret kur BTC është Bearish."""
+    try:
+        import yfinance as yf
+    except ImportError:
+        send("⚠️ yfinance nuk është instaluar ende. Railway po përditëson...")
+        return
+
+    # Kontrollo nëse është ditë pune (Mon-Fri)
+    weekday = (datetime.utcnow() + CEST).weekday()
+    if weekday >= 5:
+        send("📈 <b>Plan B — Aksione</b>\nE shtunë/Diel — tregu i aksioneve mbyllur.")
+        return
+
+    setups, watch, no = [], [], []
+
+    for ticker in STOCK_SYMBOLS:
+        try:
+            df = yf.download(ticker, period="60d", interval="1d",
+                             auto_adjust=True, progress=False)
+            if df.empty or len(df) < 22:
+                no.append(f"{ticker} (pa të dhëna)")
+                continue
+
+            closes = df["Close"].tolist()
+            opens  = df["Open"].tolist()
+            highs  = df["High"].tolist()
+            lows   = df["Low"].tolist()
+            vols   = df["Volume"].tolist()
+
+            ema     = get_ema(closes)
+            ema_prev = get_ema(closes[:-3])
+            trend   = ema > ema_prev
+            cur, opn, hi, lo = closes[-1], opens[-1], highs[-1], lows[-1]
+            zone    = ema * 0.005
+            in_zone = lo <= ema + zone and hi >= ema - zone
+            bounce  = in_zone and cur > ema and cur > opn
+            dist    = round((cur - ema) / ema * 100, 2)
+            vol_avg = sum(vols[:-1]) / len(vols[:-1])
+            vol_ok  = vols[-1] >= vol_avg * 0.6
+
+            if trend and bounce and vol_ok:
+                entry  = round(cur, 2)
+                sl     = round(min(lows[-2] * 0.999, ema * 0.997), 2)
+                rpt    = entry - sl
+                sl_pct = round(rpt / entry * 100, 2)
+                if sl_pct <= 2.0 and sl < ema:
+                    tp     = round(entry + rpt * 2, 2)
+                    tp_pct = round(rpt * 2 / entry * 100, 2)
+                    setups.append(
+                        f"<b>{ticker}</b> LONG (Daily EMA20)\n"
+                        f"Entry: ${entry}  |  SL: ${sl} (-{sl_pct}%)  |  TP: ${tp} (+{tp_pct}%)"
+                    )
+            elif trend and in_zone:
+                watch.append(f"{ticker} ({dist:+.2f}%)")
+            else:
+                reason = "trend down" if not trend else "nuk ka pullback"
+                no.append(f"{ticker} ({reason})")
+        except Exception as e:
+            no.append(f"{ticker} (gabim)")
+
+    now = now_cest()
+    msg = (f"📈 <b>PLAN B — AKSIONE  |  {now}</b>\n"
+           f"<i>Kripto në pritje (BTC Bearish)</i>\n{'─'*28}\n\n")
+    if setups:
+        msg += "✅ <b>SETUP:</b>\n" + "\n\n".join(setups) + "\n\n"
+    if watch:
+        msg += "👀 <b>Afër EMA20:</b> " + " | ".join(watch) + "\n\n"
+    if not setups and not watch:
+        msg += "Asnjë setup aksionesh tani. Prit.\n\n"
+    if no:
+        msg += "❌ Pa setup: " + " | ".join(no)
+    send(msg)
+
+
 def do_scan(triggered_by_command=False):
     """BTC Daily+4h EMA20 gatekeeper (Sniper) → coins me filtër cilësie → chart."""
     if triggered_by_command:
@@ -494,13 +571,14 @@ def do_scan(triggered_by_command=False):
         if not bull_d:  reason.append(f"Daily EMA20: ${round(emad,2)} — çmimi nën të")
         if not bull_4h: reason.append(f"4h EMA20:    ${round(ema4h,2)} — çmimi nën të")
         send(
-            f"🎯 <b>SNIPER — nuk ka trade sot</b>\n"
+            f"🎯 <b>SNIPER — kripto në pritje</b>\n"
             f"BTC: <b>${btc_price}</b>\n"
             f"  Daily EMA20 {tick_d}  ${round(emad,2)}\n"
             f"  4h EMA20    {tick_4h}  ${round(ema4h,2)}\n\n"
             f"📋 {chr(10).join(reason)}\n\n"
-            f"<i>Presim konfirmim të dyfishtë — më mirë 2 javë pa trade sesa humbje.</i>"
+            f"<i>Duke skanuar aksionet si Plan B...</i>"
         )
+        scan_stocks()
         return
 
     setups, watch = [], []
