@@ -581,10 +581,14 @@ def fetch_etf_flows():
             headers={"coinglassSecret": COINGLASS_KEY},
             timeout=10
         )
+        raw  = resp.text[:600]
         data = resp.json()
-        print(f"[Coinglass ETF] status={resp.status_code} code={data.get('code')} msg={data.get('msg')} data_len={len(data.get('data') or [])}", flush=True)
-        if data.get("code") != "0" or not data.get("data"):
-            return f"ETF flows: {data.get('msg', 'pa të dhëna')} (code {data.get('code')}).\n"
+        print(f"[Coinglass ETF] status={resp.status_code} raw={raw}", flush=True)
+        # support both {"code":"0",...} and {"success":true,...}
+        ok = (data.get("code") == "0") or (data.get("success") is True)
+        rows = data.get("data") or []
+        if not ok or not rows:
+            return f"ETF flows: {data.get('msg', raw[:120])}.\n"
         rows   = data["data"]
         recent = rows[:3]  # 3 ditët e fundit
         lines  = ["<b>BTC ETF Flows (mln USD):</b>"]
