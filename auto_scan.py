@@ -2,21 +2,13 @@
 Auto-Scan: läuft täglich via Windows Task Scheduler
 Sendet EMA20 Scan-Ergebnis direkt per Telegram
 """
-import html, json, os, sys, time, hmac, hashlib, requests
+import json, time, hmac, hashlib, requests
 from datetime import datetime
 
-TOKEN   = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-
-if not TOKEN or not CHAT_ID:
-    try:
-        _cfg_path = os.path.join(os.path.dirname(__file__), "telegram_config.json")
-        with open(_cfg_path) as f:
-            cfg = json.load(f)
-        TOKEN   = cfg["bot_token"]
-        CHAT_ID = cfg["chat_id"]
-    except Exception:
-        raise RuntimeError("Kein TELEGRAM_TOKEN / TELEGRAM_CHAT_ID gesetzt.")
+with open("C:/Users/Gianni/TradingBot/telegram_config.json") as f:
+    cfg = json.load(f)
+TOKEN   = cfg["bot_token"]
+CHAT_ID = cfg["chat_id"]
 
 SYMBOLS = [
     "BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","LINKUSDT",
@@ -54,10 +46,10 @@ try:
         for ev in high:
             try: t = datetime.fromisoformat(ev["date"]).strftime("%H:%M")
             except: t = "?"
-            cal_msg += f"  {t} {html.escape(ev['title'])}\n"
+            cal_msg += f"  {t} {ev['title']}\n"
     else:
         cal_msg = "Keine High-Impact News heute. Grünes Licht.\n"
-except Exception:
+except:
     cal_msg = "Kalender offline.\n"
 
 # ── Funding Rate BTC ──────────────────────────────────────────────────────────
@@ -73,7 +65,7 @@ try:
         fund_msg = f"BTC Funding: {fp}% — Negativ, gut für Longs.\n"
     else:
         fund_msg = f"BTC Funding: {fp}% — Neutral.\n"
-except Exception:
+except:
     fund_msg = "Funding offline.\n"
 
 # ── EMA20 Scan ────────────────────────────────────────────────────────────────
@@ -139,7 +131,7 @@ if not skip_today:
             else:
                 r = "Daily bear" if not trendd else "4h bear" if not trend4 else "kein PB"
                 no.append(f"{coin} ({r})")
-        except Exception:
+        except:
             no.append(f"{coin} (Fehler)")
 
 # ── Telegram Nachricht zusammenbauen ──────────────────────────────────────────
@@ -153,7 +145,7 @@ msg += f"<b>Funding:</b> {fund_msg}\n"
 if skip_today:
     msg += "Kein Trade heute — NEWS-TAG!"
     send(msg)
-    sys.exit()
+    exit()
 
 if setups:
     msg += f"<b>SETUPS ({len(setups)})</b>\n"
