@@ -600,89 +600,33 @@ def fetch_etf_flows():
         return f"ETF flows: gabim ({e})\n"
 
 
-def generate_liquidation_heatmap():
-    """Gjeneron BTC liquidation heatmap 3-ditore si PNG buffer."""
+def fetch_liquidation_summary():
+    """Merr BTC liquidation summary nga Coinglass (tekst). Fallback: tekst i thjeshtë."""
+    if not COINGLASS_KEY:
+        return ""
     try:
-        import numpy as np
-        import html as _html
-        now_ms   = int(time.time() * 1000)
-        start_ms = now_ms - 3 * 24 * 3600 * 1000
-
-        url  = ("https://fapi.binance.com/fapi/v1/allForceOrders?"
-                f"symbol=BTCUSDT&startTime={start_ms}&limit=1000")
-        resp = _req.get(url, timeout=12)
-        orders = resp.json()
-        if not orders or not isinstance(orders, list):
-            return None
-
-        liq_data = []
-        for o in orders:
-            ts     = int(o.get("time", 0))
-            price  = float(o.get("avgPrice") or o.get("price") or 0)
-            qty    = float(o.get("origQty", 0))
-            if price > 0 and qty > 0:
-                liq_data.append((ts, price, price * qty))
-
-        if not liq_data:
-            return None
-
-        times   = [d[0] for d in liq_data]
-        prices  = [d[1] for d in liq_data]
-
-        t_min, t_max = min(times),  max(times)
-        p_min, p_max = min(prices), max(prices)
-        p_pad  = (p_max - p_min) * 0.03
-        p_min -= p_pad; p_max += p_pad
-
-        N_TIME, N_PRICE = 24, 30
-        grid = np.zeros((N_PRICE, N_TIME))
-        for ts, price, vol in liq_data:
-            ti = min(int((ts - t_min) / max(t_max - t_min, 1) * N_TIME), N_TIME - 1)
-            pi = min(int((price - p_min) / max(p_max - p_min, 1) * N_PRICE), N_PRICE - 1)
-            grid[pi, ti] += vol / 1_000_000  # in millions USD
-
-        fig, ax = plt.subplots(figsize=(12, 7), facecolor='#131722')
-        ax.set_facecolor('#131722')
-
-        im = ax.imshow(grid, aspect='auto', origin='lower',
-                       cmap='hot', interpolation='nearest')
-
-        x_ticks = list(range(0, N_TIME, 4))
-        x_labels = []
-        for i in x_ticks:
-            ts_mid = t_min + (i + 0.5) * (t_max - t_min) / N_TIME
-            dt = datetime.utcfromtimestamp(ts_mid / 1000) + CEST
-            x_labels.append(dt.strftime("%d/%m\n%H:%M"))
-        ax.set_xticks(x_ticks)
-        ax.set_xticklabels(x_labels, color='white', fontsize=8)
-
-        y_ticks = list(range(0, N_PRICE, 5))
-        y_labels = [f"${p_min + j * (p_max - p_min) / N_PRICE:,.0f}" for j in y_ticks]
-        ax.set_yticks(y_ticks)
-        ax.set_yticklabels(y_labels, color='white', fontsize=8)
-
-        cbar = fig.colorbar(im, ax=ax, pad=0.02)
-        cbar.set_label('Liquidim (M USD)', color='white')
-        plt.setp(cbar.ax.yaxis.get_ticklabels(), color='white')
-
-        day_str = (datetime.utcnow() + CEST).strftime("%Y-%m-%d")
-        ax.set_title(f'BTC Liquidation Heatmap — 3 Ditë  ({day_str})',
-                     color='white', fontsize=13, pad=10)
-        ax.set_xlabel('Koha (CEST)', color='white')
-        ax.set_ylabel('Çmimi BTC (USD)', color='white')
-        ax.tick_params(colors='white')
-        for spine in ax.spines.values():
-            spine.set_edgecolor('#333344')
-
-        plt.tight_layout()
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#131722')
-        plt.close(fig)
-        buf.seek(0)
-        return buf
-    except Exception as e:
-        print(f"[Briefing] Heatmap error: {e}", flush=True)
-        return None
+        resp = _req.get(
+            "https://open-api.coinglass.com/public/v2/liquidation/info",
+            headers={"coinglassSecret": COINGLASS_KEY},
+            timeout=10
+        )
+        data = resp.json()
+        if data.get("code") != "0" or not data.get("data"):
+            return ""
+        d = data["data"]
+        # Fields: longLiquidationUsd, shortLiquidationUsd (24h totals)
+        longs  = float(d.get("longLiquidationUsd",  0)) / 1_000_000
+        shorts = float(d.get("shortLiquidationUsd", 0)) / 1_000_000
+        total  = longs + shorts
+        dom    = "SHORTS" if shorts > longs else "LONGS"
+        return (
+            f"<b>BTC Liquidime 24h:</b>\n"
+            f"  Longs:  🔴 ${longs:.1f}M\n"
+            f"  Shorts: 🟢 ${shorts:.1f}M\n"
+            f"  Total:  ${total:.1f}M  — dominon <b>{dom}</b>\n"
+        )
+    except Exception:
+        return ""
 
 
 def fetch_news_today():
@@ -724,15 +668,12 @@ def morning_briefing(force=False):
     send(f"☕ <b>BRIEFING MËNGJESI — {day}  09:00 CEST</b>\nDuke mbledhur të dhënat...")
 
     etf_text  = fetch_etf_flows()
+    liq_text  = fetch_liquidation_summary()
     news_text = fetch_news_today()
 
-    heatmap_buf = generate_liquidation_heatmap()
-    caption = (f"☀️ <b>BRIEFING {day}</b>\n{'─'*28}\n\n"
-               f"{etf_text}\n{news_text}")
-    if heatmap_buf:
-        send_photo(heatmap_buf, caption=caption)
-    else:
-        send(caption + "\n⚠️ Heatmap nuk u gjenerua.")
+    briefing = (f"☀️ <b>BRIEFING {day}</b>\n{'─'*28}\n\n"
+                f"{etf_text}\n{liq_text}\n{news_text}")
+    send(briefing)
 
     send("🔍 Duke skanuar setups për sot...")
     do_scan()
