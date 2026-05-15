@@ -481,17 +481,16 @@ def scan_stocks():
 
     for ticker in STOCK_SYMBOLS:
         try:
-            df = yf.download(ticker, period="60d", interval="1d",
-                             auto_adjust=True, progress=False)
-            if df.empty or len(df) < 22:
+            hist = yf.Ticker(ticker).history(period="60d", interval="1d", auto_adjust=True)
+            if hist.empty or len(hist) < 22:
                 no.append(f"{ticker} (pa të dhëna)")
                 continue
 
-            closes = df["Close"].tolist()
-            opens  = df["Open"].tolist()
-            highs  = df["High"].tolist()
-            lows   = df["Low"].tolist()
-            vols   = df["Volume"].tolist()
+            closes = [float(x) for x in hist["Close"].tolist()]
+            opens  = [float(x) for x in hist["Open"].tolist()]
+            highs  = [float(x) for x in hist["High"].tolist()]
+            lows   = [float(x) for x in hist["Low"].tolist()]
+            vols   = [float(x) for x in hist["Volume"].tolist()]
 
             ema     = get_ema(closes)
             ema_prev = get_ema(closes[:-3])
