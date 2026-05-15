@@ -471,11 +471,13 @@ def scan_stocks():
         send("⚠️ yfinance nuk është instaluar ende. Railway po përditëson...")
         return
 
-    # Kontrollo nëse është ditë pune (Mon-Fri)
-    weekday = (datetime.utcnow() + CEST).weekday()
-    if weekday >= 5:
-        send("📈 <b>Plan B — Aksione</b>\nE shtunë/Diel — tregu i aksioneve mbyllur.")
-        return
+    # Kontrollo nëse është brenda orëve të tregut: Mon-Fri, 15:00-21:30 CEST
+    now_cest_dt = datetime.utcnow() + CEST
+    weekday     = now_cest_dt.weekday()
+    hour_min    = now_cest_dt.hour * 60 + now_cest_dt.minute
+    market_open = weekday < 5 and (15 * 60) <= hour_min <= (21 * 60 + 30)
+    if not market_open:
+        return  # heshtje jashtë orëve të tregut
 
     setups, watch, no = [], [], []
 
