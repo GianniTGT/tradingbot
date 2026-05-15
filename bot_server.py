@@ -199,6 +199,7 @@ def cmd_hilfe():
     send(
         "<b>GianniTGT Trading Bot 🤖</b>\n\n"
         "/scan — Skano 20 coins (EMA20)\n"
+        "/briefing — ETF flows + heatmap + news + setups\n"
         "/price BNB — Çmimi aktual\n"
         "/alarm BNB 674.50 663.20 685 — Vendos alarm\n"
         "/alarme — Shiko alarmet aktive\n"
@@ -398,6 +399,10 @@ def cmd_trades():
         except:
             msg += f"<b>{sym.replace('USDT','')}</b>: Entry ${info['entry']} | SL ${info['sl']} | TP ${info['tp']}\n\n"
     send(msg)
+
+def cmd_briefing():
+    """Dërgon briefing mëngjesi manualisht (force=True)."""
+    threading.Thread(target=morning_briefing, kwargs={"force": True}, daemon=True).start()
 
 def cmd_stoptrade(parts):
     if len(parts) < 2:
@@ -707,12 +712,13 @@ def fetch_news_today():
         return "📅 Kalendarit offline.\n"
 
 
-def morning_briefing():
+def morning_briefing(force=False):
     """09:00 CEST: ETF flows + Liquidation Heatmap + News + Setups."""
     day = (datetime.utcnow() + CEST).strftime("%Y-%m-%d")
-    if day in _briefing_done:
-        return
-    _briefing_done.add(day)
+    if not force:
+        if day in _briefing_done:
+            return
+        _briefing_done.add(day)
 
     print(f"[Briefing] Starting morning briefing {day}", flush=True)
     send(f"☕ <b>BRIEFING MËNGJESI — {day}  09:00 CEST</b>\nDuke mbledhur të dhënat...")
@@ -932,6 +938,7 @@ def main():
 
                 if cmd == "/hilfe":          cmd_hilfe()
                 elif cmd == "/scan":         threading.Thread(target=do_scan, args=(True,), daemon=True).start()
+                elif cmd == "/briefing":     cmd_briefing()
                 elif cmd == "/price":        cmd_price(parts)
                 elif cmd == "/alarm":        cmd_alarm(parts)
                 elif cmd == "/alarme":       cmd_alarme()
