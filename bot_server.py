@@ -789,7 +789,7 @@ def morning_briefing(force=False):
         send(text_part)
 
     send("🔍 Duke skanuar setups për sot...")
-    do_scan()
+    do_scan(triggered_by_command=True)
 
 
 _last_auto_scan = 0.0
