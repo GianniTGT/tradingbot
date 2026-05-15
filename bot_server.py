@@ -597,33 +597,59 @@ def fetch_market_sentiment():
     return "\n".join(lines) + "\n" if lines else ""
 
 
-def fetch_liquidation_summary():
-    """Merr BTC liquidation summary nga Coinglass (tekst). Fallback: tekst i thjeshtë."""
+def generate_liquidation_chart():
+    """BTC liquidation bar chart (3 ditë, 4h buckets) nga Coinglass. Kthen PNG buffer ose None."""
     if not COINGLASS_KEY:
-        return ""
+        return None
     try:
         resp = _req.get(
-            "https://open-api.coinglass.com/public/v2/liquidation/info",
+            "https://open-api.coinglass.com/public/v2/liquidation/chart",
             headers={"coinglassSecret": COINGLASS_KEY},
+            params={"symbol": "BTC", "time_type": "h4", "limit": "18"},
             timeout=10
         )
         data = resp.json()
-        if data.get("code") != "0" or not data.get("data"):
-            return ""
-        d = data["data"]
-        # Fields: longLiquidationUsd, shortLiquidationUsd (24h totals)
-        longs  = float(d.get("longLiquidationUsd",  0)) / 1_000_000
-        shorts = float(d.get("shortLiquidationUsd", 0)) / 1_000_000
-        total  = longs + shorts
-        dom    = "SHORTS" if shorts > longs else "LONGS"
-        return (
-            f"<b>BTC Liquidime 24h:</b>\n"
-            f"  Longs:  🔴 ${longs:.1f}M\n"
-            f"  Shorts: 🟢 ${shorts:.1f}M\n"
-            f"  Total:  ${total:.1f}M  — dominon <b>{dom}</b>\n"
-        )
-    except Exception:
-        return ""
+        print(f"[Coinglass LIQ] status={resp.status_code} code={data.get('code')} raw={resp.text[:200]}", flush=True)
+        ok   = (data.get("code") == "0") or (data.get("success") is True)
+        rows = data.get("data") or []
+        if not ok or not rows:
+            return None
+
+        # rows: [{time, longLiquidationUsd, shortLiquidationUsd}, ...]
+        times  = []
+        longs  = []
+        shorts = []
+        for r in rows:
+            ts = int(r.get("time", r.get("t", 0)))
+            dt = datetime.utcfromtimestamp(ts / 1000 if ts > 1e10 else ts) + CEST
+            times.append(dt.strftime("%d/%m\n%H:%M"))
+            longs.append(float(r.get("longLiquidationUsd",  r.get("long",  0))) / 1_000_000)
+            shorts.append(float(r.get("shortLiquidationUsd", r.get("short", 0))) / 1_000_000)
+
+        x = range(len(times))
+        fig, ax = plt.subplots(figsize=(12, 5), facecolor='#131722')
+        ax.set_facecolor('#131722')
+        ax.bar([i - 0.2 for i in x], longs,  width=0.38, color='#ff4444', label='Longs likuiduar')
+        ax.bar([i + 0.2 for i in x], shorts, width=0.38, color='#00cc66', label='Shorts likuiduar')
+        ax.set_xticks(list(x))
+        ax.set_xticklabels(times, color='white', fontsize=7)
+        ax.tick_params(colors='white')
+        ax.yaxis.set_tick_params(labelcolor='white')
+        ax.set_ylabel('Milion USD', color='white')
+        day_str = (datetime.utcnow() + CEST).strftime("%Y-%m-%d")
+        ax.set_title(f'BTC Liquidime — 3 Ditë 4h  ({day_str})', color='white', fontsize=13)
+        ax.legend(facecolor='#1e2030', labelcolor='white', fontsize=9)
+        for spine in ax.spines.values():
+            spine.set_edgecolor('#333344')
+        plt.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#131722')
+        plt.close(fig)
+        buf.seek(0)
+        return buf
+    except Exception as e:
+        print(f"[Coinglass LIQ] error: {e}", flush=True)
+        return None
 
 
 def fetch_news_today():
@@ -665,12 +691,15 @@ def morning_briefing(force=False):
     send(f"☕ <b>BRIEFING MËNGJESI — {day}  09:00 CEST</b>\nDuke mbledhur të dhënat...")
 
     sentiment_text = fetch_market_sentiment()
-    liq_text       = fetch_liquidation_summary()
     news_text      = fetch_news_today()
+    text_part      = (f"☀️ <b>BRIEFING {day}</b>\n{'─'*28}\n\n"
+                      f"{sentiment_text}\n{news_text}")
 
-    briefing = (f"☀️ <b>BRIEFING {day}</b>\n{'─'*28}\n\n"
-                f"{sentiment_text}\n{liq_text}\n{news_text}")
-    send(briefing)
+    liq_chart = generate_liquidation_chart()
+    if liq_chart:
+        send_photo(liq_chart, caption=text_part)
+    else:
+        send(text_part)
 
     send("🔍 Duke skanuar setups për sot...")
     do_scan()
