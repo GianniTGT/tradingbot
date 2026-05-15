@@ -462,31 +462,44 @@ def send_photo(buf, caption=""):
         send(caption)
 
 def do_scan(triggered_by_command=False):
-    """BTC 4h EMA20 gatekeeper → skanoj coins me filtër cilësie → chart."""
+    """BTC Daily+4h EMA20 gatekeeper (Sniper) → coins me filtër cilësie → chart."""
     if triggered_by_command:
         send("Duke skanuar... prit.")
 
-    # BTC 4h EMA20 kontrollo
+    # ── BTC Sniper Filter: Daily + 4h EMA20 ──────────────────────────────────
     try:
         url4 = "https://api.binance.com/api/v3/klines?" + urlencode(
             {"symbol": "BTCUSDT", "interval": "4h", "limit": 50})
-        with urlopen(url4, timeout=8) as r:
-            d4_btc = json.loads(r.read())
+        urld = "https://api.binance.com/api/v3/klines?" + urlencode(
+            {"symbol": "BTCUSDT", "interval": "1d", "limit": 25})
+        with urlopen(url4, timeout=8) as r: d4_btc = json.loads(r.read())
+        with urlopen(urld, timeout=8) as r: dd_btc = json.loads(r.read())
+
         c4_btc    = [float(k[4]) for k in d4_btc]
-        ema_btc   = get_ema(c4_btc)
+        cd_btc    = [float(k[4]) for k in dd_btc]
+        ema4h     = get_ema(c4_btc)
+        emad      = get_ema(cd_btc)
         btc_price = round(c4_btc[-1], 2)
-        btc_ema   = round(ema_btc, 2)
-        btc_bull  = c4_btc[-1] > ema_btc
+        bull_4h   = c4_btc[-1] > ema4h
+        bull_d    = cd_btc[-1]  > emad
     except Exception:
         if triggered_by_command:
             send("Gabim: nuk arrita të marr të dhënat e BTC.")
         return
 
-    if not btc_bull:
+    if not (bull_4h and bull_d):
+        tick_4h = "✅" if bull_4h else "❌"
+        tick_d  = "✅" if bull_d  else "❌"
+        reason  = []
+        if not bull_d:  reason.append(f"Daily EMA20: ${round(emad,2)} — çmimi nën të")
+        if not bull_4h: reason.append(f"4h EMA20:    ${round(ema4h,2)} — çmimi nën të")
         send(
-            "Për momentin nuk ka setup-e të mira.\n"
-            f"BTC është nën EMA20 — ${btc_price} (EMA: ${btc_ema}) — Bearish.\n\n"
-            "Presim një ambient më të sigurt tregtar."
+            f"🎯 <b>SNIPER — nuk ka trade sot</b>\n"
+            f"BTC: <b>${btc_price}</b>\n"
+            f"  Daily EMA20 {tick_d}  ${round(emad,2)}\n"
+            f"  4h EMA20    {tick_4h}  ${round(ema4h,2)}\n\n"
+            f"📋 {chr(10).join(reason)}\n\n"
+            f"<i>Presim konfirmim të dyfishtë — më mirë 2 javë pa trade sesa humbje.</i>"
         )
         return
 
