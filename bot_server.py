@@ -843,12 +843,17 @@ def morning_briefing(force=False):
         _briefing_done.add(day)
 
     print(f"[Briefing] Starting morning briefing {day}", flush=True)
-    send(f"☕ <b>BRIEFING MËNGJESI — {day}  09:00 CEST</b>\nDuke mbledhur të dhënat...")
 
     sentiment_text = fetch_market_sentiment()
     news_text      = fetch_news_today()
-    text_part      = (f"☀️ <b>BRIEFING {day}</b>\n{'─'*28}\n\n"
-                      f"{sentiment_text}\n{news_text}")
+
+    # Gjithçka në 1 bubble
+    text_part = (
+        f"☀️ <b>BRIEFING MËNGJESI — {day}  09:00 CEST</b>\n{'─'*28}\n\n"
+        f"{sentiment_text}\n"
+        f"{news_text}\n"
+        f"🔍 <i>Duke skanuar setups...</i>"
+    )
 
     liq_chart = generate_liquidation_chart()
     if liq_chart:
@@ -856,7 +861,6 @@ def morning_briefing(force=False):
     else:
         send(text_part)
 
-    send("🔍 Duke skanuar setups për sot...")
     do_scan(triggered_by_command=True)
 
 
