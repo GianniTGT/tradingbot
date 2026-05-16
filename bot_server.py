@@ -847,12 +847,11 @@ def morning_briefing(force=False):
     sentiment_text = fetch_market_sentiment()
     news_text      = fetch_news_today()
 
-    # Gjithçka në 1 bubble
+    # Bubble 1: briefing i pastër pa "Duke skanuar..."
     text_part = (
         f"☀️ <b>BRIEFING MËNGJESI — {day}  09:00 CEST</b>\n{'─'*28}\n\n"
         f"{sentiment_text}\n"
-        f"{news_text}\n"
-        f"🔍 <i>Duke skanuar setups...</i>"
+        f"{news_text}"
     )
 
     liq_chart = generate_liquidation_chart()
@@ -861,6 +860,7 @@ def morning_briefing(force=False):
     else:
         send(text_part)
 
+    # Bubble 2: rezultati i skanimit (setup chart OSE status — 1 bubble)
     do_scan(triggered_by_command=True)
 
 
