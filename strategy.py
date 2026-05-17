@@ -127,28 +127,35 @@ def calc_adx(highs, lows, closes, n=14):
     di_m  = di_m_list[-1] if di_m_list else 0.0
     return di_p, di_m, adx
 
+# ── Binance Signed Requests ────────────────────────────────────────────────────
+def _binance_signed(method: str, path: str, params: dict, api_key: str, api_secret: str) -> dict:
+    """Führt einen signierten Binance API-Request aus (GET oder POST)."""
+    params["timestamp"] = int(time.time() * 1000)
+    query = urlencode(sorted(params.items()))
+    sig   = hmac.new(api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+    url   = f"https://api.binance.com{path}"
+    headers = {"X-MBX-APIKEY": api_key}
+    if method == "GET":
+        resp = requests.get(url, params={**params, "signature": sig}, headers=headers, timeout=10)
+    else:
+        resp = requests.post(url, params={**params, "signature": sig}, headers=headers, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
 # ── Binance Account ────────────────────────────────────────────────────────────
-def get_binance_usdt_balance(api_key, api_secret, fallback=0.0):
-    """
-    Holt das freie USDT-Guthaben vom Binance Spot Account (signierter Request).
-    Gibt fallback zurück wenn kein Key gesetzt oder Fehler.
-    """
+def get_binance_usdt_balance(api_key: str, api_secret: str, fallback: float = 0.0) -> float:
+    """Holt das freie USDT-Guthaben vom Binance Spot Account."""
     if not api_key or not api_secret:
         return fallback
     try:
-        ts      = int(time.time() * 1000)
-        params  = f"timestamp={ts}"
-        sig     = hmac.new(api_secret.encode(), params.encode(), hashlib.sha256).hexdigest()
-        url     = f"https://api.binance.com/api/v3/account?{params}&signature={sig}"
-        req     = Request(url, headers={"X-MBX-APIKEY": api_key})
-        with urlopen(req, timeout=10) as r:
-            data = json.loads(r.read())
+        data = _binance_signed("GET", "/api/v3/account", {}, api_key, api_secret)
         for b in data.get("balances", []):
             if b["asset"] == "USDT":
                 return float(b["free"])
     except Exception:
         pass
     return fallback
+
 
 # ── Binance Daten ──────────────────────────────────────────────────────────────
 def get_candles(symbol: str, interval: str, limit: int = 300) -> list:
