@@ -17,7 +17,8 @@ from urllib.request import urlopen, Request
 from urllib.parse import urlencode
 from urllib.error import URLError
 from datetime import datetime, timedelta
-from strategy import scan_all_symbols, get_binance_candles, get_binance_usdt_balance, round_price as _round_price
+from strategy import (scan_all_symbols, get_binance_candles, get_binance_usdt_balance,
+                       round_price as _round_price)
 
 CEST = timedelta(hours=2)
 def now_cest():
