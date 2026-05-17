@@ -7,6 +7,7 @@ Einsatz: Krypto (Binance 15m + 1H) und später Aktien (gleiche Logik, andere Que
 from urllib.request import urlopen, Request
 from urllib.parse import urlencode
 import json, time, hmac, hashlib
+import requests
 
 # ── Default Config (spiegelt Pine Script Inputs) ───────────────────────────────
 DEFAULT_CONFIG = {
@@ -150,21 +151,28 @@ def get_binance_usdt_balance(api_key, api_secret, fallback=0.0):
     return fallback
 
 # ── Binance Daten ──────────────────────────────────────────────────────────────
-def get_binance_candles(symbol, interval, limit=300):
+def get_candles(symbol: str, interval: str, limit: int = 300) -> list:
     """
     Holt OHLCV-Kerzen von Binance Spot API.
-    Gibt Liste von Dicts zurück: [{"t", "o", "h", "l", "c", "v"}, ...]
+    Gibt Liste von Dicts zurück: [{"open", "high", "low", "close", "volume"}, ...]
     """
-    url = "https://api.binance.com/api/v3/klines?" + urlencode(
-        {"symbol": symbol, "interval": interval, "limit": limit}
-    )
-    with urlopen(url, timeout=10) as r:
-        raw = json.loads(r.read())
+    url    = "https://api.binance.com/api/v3/klines"
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    resp   = requests.get(url, params=params, timeout=10)
+    resp.raise_for_status()
     return [
-        {"t": k[0], "o": float(k[1]), "h": float(k[2]),
-         "l": float(k[3]), "c": float(k[4]), "v": float(k[5])}
-        for k in raw
+        {
+            "open":   float(c[1]),
+            "high":   float(c[2]),
+            "low":    float(c[3]),
+            "close":  float(c[4]),
+            "volume": float(c[5]),
+        }
+        for c in resp.json()
     ]
+
+# Alias für Rückwärtskompatibilität mit bot_server.py
+get_binance_candles = get_candles
 
 # ── 7-Filter Core ──────────────────────────────────────────────────────────────
 def check_ema_sniper_setup(candles_15m, candles_1h, config=None):
@@ -190,11 +198,11 @@ def check_ema_sniper_setup(candles_15m, candles_1h, config=None):
         return None
 
     # Arrays extrahieren (15m)
-    closes = [c["c"] for c in candles_15m]
-    opens  = [c["o"] for c in candles_15m]
-    highs  = [c["h"] for c in candles_15m]
-    lows   = [c["l"] for c in candles_15m]
-    vols   = [c["v"] for c in candles_15m]
+    closes = [c["close"]  for c in candles_15m]
+    opens  = [c["open"]   for c in candles_15m]
+    highs  = [c["high"]   for c in candles_15m]
+    lows   = [c["low"]    for c in candles_15m]
+    vols   = [c["volume"] for c in candles_15m]
 
     cur_close = closes[-1]
     cur_high  = highs[-1]
@@ -221,7 +229,7 @@ def check_ema_sniper_setup(candles_15m, candles_1h, config=None):
     cur_vol = vols[-1]
 
     # HTF 1H
-    closes_1h = [c["c"] for c in candles_1h]
+    closes_1h = [c["close"] for c in candles_1h]
     ema20_1h  = calc_ema(closes_1h, el[0])
     ema50_1h  = calc_ema(closes_1h, el[1])
     ema200_1h = calc_ema(closes_1h, el[3])
@@ -312,8 +320,8 @@ def scan_all_symbols(symbols, equity=0, config=None):
     for sym in symbols:
         coin = sym.replace("USDT", "")
         try:
-            candles_15m = get_binance_candles(sym, "15m", 300)
-            candles_1h  = get_binance_candles(sym, "1h",  300)
+            candles_15m = get_candles(sym, "15m", 300)
+            candles_1h  = get_candles(sym, "1h",  300)
             result      = check_ema_sniper_setup(candles_15m, candles_1h, cfg)
 
             if result is None:
