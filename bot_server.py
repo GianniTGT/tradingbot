@@ -441,18 +441,19 @@ _sl_alerted = {}
 
 def generate_chart(sym, candles_15m_dicts, entry, sl, tp):
     """Generiert PNG 15m Candlestick-Chart mit EMA20/50/100/200 + Entry/SL/TP-Linien."""
-    from strategy import calc_ema as _ema
-    window  = candles_15m_dicts[-80:]
-    times   = [pd.Timestamp(int(c["t"]), unit="ms") for c in window]
+    window = candles_15m_dicts[-80:]
+    # Synthetische Timestamps (15m-Raster, rückwärts vom jetzigen Moment)
+    end   = pd.Timestamp.utcnow().floor("15min")
+    times = pd.date_range(end=end, periods=len(window), freq="15min")
     df = pd.DataFrame({
-        "Open":   [c["o"] for c in window],
-        "High":   [c["h"] for c in window],
-        "Low":    [c["l"] for c in window],
-        "Close":  [c["c"] for c in window],
-        "Volume": [c["v"] for c in window],
-    }, index=pd.DatetimeIndex(times))
+        "Open":   [c["open"]   for c in window],
+        "High":   [c["high"]   for c in window],
+        "Low":    [c["low"]    for c in window],
+        "Close":  [c["close"]  for c in window],
+        "Volume": [c["volume"] for c in window],
+    }, index=times)
 
-    all_closes = [c["c"] for c in candles_15m_dicts]
+    all_closes = [c["close"] for c in candles_15m_dicts]
 
     def ema_series(n, color, width=1.2):
         k, e = 2 / (n + 1), all_closes[0]
