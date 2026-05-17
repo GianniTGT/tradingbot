@@ -18,7 +18,7 @@ from urllib.parse import urlencode
 from urllib.error import URLError
 from datetime import datetime, timedelta
 from strategy import (scan_all_symbols, get_binance_candles, get_binance_usdt_balance,
-                       round_price as _round_price)
+                       execute_trade, round_price as _round_price)
 
 CEST = timedelta(hours=2)
 def now_cest():
@@ -57,9 +57,16 @@ STOCK_SYMBOLS = ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL", "PG", "JNJ"]
 active_alerts = {}  # { "SOLUSDT": {"entry":..,"sl":..,"tp":..,"thread":..} }
 active_trades = {}  # { "SOLUSDT": {"entry":..,"sl":..,"tp":..,"thread":..} }
 _lock = threading.Lock()
-POSITION_SIZE    = float(os.environ.get("POSITION_SIZE", "0"))
-BINANCE_API_KEY  = os.environ.get("BINANCE_API_KEY", "")
+POSITION_SIZE      = float(os.environ.get("POSITION_SIZE", "0"))
+BINANCE_API_KEY    = os.environ.get("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
+# AUTO_TRADE=true  → sofort ausführen ohne Bestätigung
+# AUTO_TRADE=false → 2-Minuten-Fenster, /trade COIN bestätigt den Trade
+AUTO_TRADE = os.environ.get("AUTO_TRADE", "false").lower() == "true"
+CONFIRM_WINDOW_SEC = 120  # Sekunden bis Alert abläuft
+
+# Pending Setups: {symbol: {"entry", "sl", "tp", "equity", "expires", "coin"}}
+_pending_setups: dict = {}
 
 def get_equity():
     """Live USDT-Balance von Binance; fällt auf POSITION_SIZE-Env-Var zurück."""
@@ -302,6 +309,50 @@ def cmd_price(parts):
 def cmd_scan():
     """Manueller /scan — EMA Sniper 7-Filter (15m + 1H Confluence)."""
     do_scan(triggered_by_command=True, show_loading=True)
+
+def cmd_trade_confirm(parts):
+    """
+    /trade BTC — bestätigt einen pending Setup innerhalb des 2-Minuten-Fensters.
+    Führt Market Buy + OCO aus.
+    """
+    now = time.time()
+    # Abgelaufene Setups aufräumen
+    expired = [sym for sym, p in _pending_setups.items() if p["expires"] < now]
+    for sym in expired:
+        _pending_setups.pop(sym, None)
+
+    if len(parts) < 2:
+        # Kein Coin angegeben — zeige alle offenen Pending
+        if not _pending_setups:
+            send("Kein offenes Setup. Warte auf nächsten Scan.")
+            return
+        lines = []
+        for sym, p in _pending_setups.items():
+            sek = int(p["expires"] - now)
+            lines.append(f"/trade {p['coin']}  (noch {sek}s)")
+        send("Offene Setups:\n" + "\n".join(lines))
+        return
+
+    coin   = parts[1].upper().replace("USDT", "")
+    symbol = coin + "USDT"
+
+    if symbol not in _pending_setups:
+        send(f"Kein offenes Setup für {coin}. Entweder abgelaufen oder kein Signal.")
+        return
+
+    p = _pending_setups.pop(symbol)
+    if p["expires"] < now:
+        send(f"⏰ Zeit abgelaufen für <b>{coin}</b>. Setup ist nicht mehr gültig.")
+        return
+
+    send(f"⚡ <b>{coin}</b> bestätigt — platziere Order...")
+    threading.Thread(
+        target=_fire_trade,
+        args=(symbol, coin, p["entry"], p["sl"], p["tp"],
+              p["sl_pct"], p["tp_pct"], p["equity"]),
+        daemon=True
+    ).start()
+
 
 def cmd_alarm(parts):
     if len(parts) < 3:
@@ -566,8 +617,26 @@ def scan_stocks():
     send(msg)
 
 
+def _fire_trade(symbol: str, coin: str, entry: float, sl: float, tp: float,
+                sl_pct: float, tp_pct: float, equity: float):
+    """Führt Market Buy + OCO aus und schickt Bestätigung per Telegram."""
+    if not (BINANCE_API_KEY and BINANCE_API_SECRET):
+        send(f"⚠️ <b>{coin}</b>: Keine Binance API Keys — Trade nicht ausgeführt.")
+        return
+    result = execute_trade(symbol, entry, sl, tp, equity, BINANCE_API_KEY, BINANCE_API_SECRET)
+    if result["ok"]:
+        send(
+            f"✅ <b>TRADE AUSGEFÜHRT: {coin} LONG</b>\n"
+            f"Entry: ${entry}  |  Menge: {result['qty']} {coin}\n"
+            f"SL: ${sl} (-{sl_pct}%)  |  TP: ${tp} (+{tp_pct}%)\n"
+            f"Risiko: ${round(equity * 0.01, 2)}"
+        )
+    else:
+        send(f"❌ <b>{coin} Order fehlgeschlagen:</b> {result['error']}")
+
+
 def do_scan(triggered_by_command=False, show_loading=True):
-    """EMA Sniper — 7 Filter (15m + 1H Confluence) → alle 20 Coins → Chart."""
+    """EMA Sniper — 7 Filter (15m + 1H) → Alert → 2-min Bestätigung oder AUTO_TRADE."""
     if triggered_by_command and show_loading:
         send("Duke skanuar... prit.")
 
@@ -584,18 +653,47 @@ def do_scan(triggered_by_command=False, show_loading=True):
 
             chart   = generate_chart(s["symbol"], s["candles_15m"], s["entry"], s["sl"], s["tp"])
             htf_tag = "1H ✅" if s["htf_bull"] else "1H ⚠️"
-            caption = (
-                f"<b>{s['coin']} LONG  |  {htf_tag}  |  {now}</b>\n"
-                f"Entry: ${s['entry']}  |  SL: ${s['sl']} (-{s['sl_pct']}%)"
-                f"  |  TP: ${s['tp']} (+{s['tp_pct']}%)\n"
-                f"RSI: {s['rsi']}  |  ADX: {s['adx']}"
-                f"  |  Risiko: ${s['risk_usd']}\n"
-                f"/alarm {s['coin']} {s['entry']} {s['sl']} {s['tp']}"
-            )
-            send_photo(chart, caption=caption)
+
+            if AUTO_TRADE:
+                # Vollautomatisch — sofort ausführen
+                caption = (
+                    f"🤖 <b>EMA SNIPER {s['coin']} 15m  |  {htf_tag}  |  {now}</b>\n"
+                    f"Entry: ${s['entry']}  |  SL: ${s['sl']} (-{s['sl_pct']}%)"
+                    f"  |  TP: ${s['tp']} (+{s['tp_pct']}%)\n"
+                    f"RSI: {s['rsi']}  |  ADX: {s['adx']}  |  Filters: 7/7 ✅\n"
+                    f"<i>AUTO_TRADE aktiv — Order wird platziert...</i>"
+                )
+                send_photo(chart, caption=caption)
+                threading.Thread(
+                    target=_fire_trade,
+                    args=(s["symbol"], s["coin"], s["entry"], s["sl"], s["tp"],
+                          s["sl_pct"], s["tp_pct"], equity),
+                    daemon=True
+                ).start()
+            else:
+                # Semi-automatisch — 2-Minuten-Bestätigungsfenster
+                _pending_setups[s["symbol"]] = {
+                    "coin":    s["coin"],
+                    "entry":   s["entry"],
+                    "sl":      s["sl"],
+                    "tp":      s["tp"],
+                    "sl_pct":  s["sl_pct"],
+                    "tp_pct":  s["tp_pct"],
+                    "equity":  equity,
+                    "expires": time.time() + CONFIRM_WINDOW_SEC,
+                }
+                caption = (
+                    f"🎯 <b>EMA SNIPER {s['coin']} 15m  |  {htf_tag}  |  {now}</b>\n"
+                    f"Entry: ${s['entry']}  |  SL: ${s['sl']} (-{s['sl_pct']}%)"
+                    f"  |  TP: ${s['tp']} (+{s['tp_pct']}%)\n"
+                    f"RSI: {s['rsi']}  |  ADX: {s['adx']}  |  Filters: 7/7 ✅\n"
+                    f"⏱ <b>2 Minuten:</b>  /trade {s['coin']}  um auszuführen"
+                )
+                send_photo(chart, caption=caption)
+
     elif triggered_by_command:
         watch_str = " | ".join(f"{w['coin']} ({w['dist_pct']:+.2f}%)" for w in watch)
-        msg = f"🎯 <b>EMA Sniper — {now}</b>\nKein Setup (alle 7 Filter bestanden von keinem Coin)."
+        msg = f"🎯 <b>EMA Sniper — {now}</b>\nKein Setup — alle 7 Filter von keinem Coin erfüllt."
         if watch_str:
             msg += f"\n👀 Beobachten: {watch_str}"
         send(msg)
@@ -896,7 +994,9 @@ def main():
                 elif cmd == "/alarm":        cmd_alarm(parts)
                 elif cmd == "/alarme":       cmd_alarme()
                 elif cmd == "/stop":         cmd_stop(parts)
-                elif cmd == "/trade":        cmd_trade(parts)
+                elif cmd == "/trade":
+                    if len(parts) >= 5:  cmd_trade(parts)          # /trade BNB entry sl tp
+                    else:                cmd_trade_confirm(parts)   # /trade BNB — Bestätigung
                 elif cmd == "/trades":       cmd_trades()
                 elif cmd == "/stoptrade":    cmd_stoptrade(parts)
                 else: send("Komandë e panjohur. Shkruaj /hilfe")
