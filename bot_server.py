@@ -2,7 +2,7 @@
 """
 GianniTGTradingBot — Interaktiver Trading Bot
 Befehle die du im Telegram schreiben kannst:
-  /scan           — EMA20 Scan aller 15 Coins (4h)
+  /scan           — EMA Sniper Scan aller 20 Coins (15m + 1H Confluence)
   /price SOL      — Aktueller Preis eines Coins
   /alarm SOL 91.05 89.64 93.87 — Alarm setzen (wartet auf Entry)
   /alarme         — Alle aktiven Alarme anzeigen
@@ -17,6 +17,7 @@ from urllib.request import urlopen, Request
 from urllib.parse import urlencode
 from urllib.error import URLError
 from datetime import datetime, timedelta
+from strategy import scan_all_symbols, get_binance_candles, get_binance_usdt_balance, round_price as _round_price
 
 CEST = timedelta(hours=2)
 def now_cest():
@@ -55,9 +56,17 @@ STOCK_SYMBOLS = ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL", "PG", "JNJ"]
 active_alerts = {}  # { "SOLUSDT": {"entry":..,"sl":..,"tp":..,"thread":..} }
 active_trades = {}  # { "SOLUSDT": {"entry":..,"sl":..,"tp":..,"thread":..} }
 _lock = threading.Lock()
-POSITION_SIZE = float(os.environ.get("POSITION_SIZE", "0"))
-if not POSITION_SIZE:
-    print("[Bot] Hint: POSITION_SIZE not set — PnL calculation disabled.", flush=True)
+POSITION_SIZE    = float(os.environ.get("POSITION_SIZE", "0"))
+BINANCE_API_KEY  = os.environ.get("BINANCE_API_KEY", "")
+BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
+
+def get_equity():
+    """Live USDT-Balance von Binance; fällt auf POSITION_SIZE-Env-Var zurück."""
+    if BINANCE_API_KEY and BINANCE_API_SECRET:
+        bal = get_binance_usdt_balance(BINANCE_API_KEY, BINANCE_API_SECRET)
+        if bal > 0:
+            return bal
+    return POSITION_SIZE if POSITION_SIZE else 1000.0
 CHAT_ID = str(CHAT_ID) if CHAT_ID else CHAT_ID
 COINGLASS_KEY = os.environ.get("COINGLASS_API_KEY", "")
 offset = 0
@@ -290,64 +299,8 @@ def cmd_price(parts):
         send(f"Coin {coin} nuk u gjet. Kontrollo emrin.")
 
 def cmd_scan():
-    """Skan manual — me BTC filtër."""
-    btc_ok, btc_emoji, btc_desc = get_btc_status()
-    send(f"Duke skanuar 20 coins... prit.\n{btc_emoji} {btc_desc}")
-    results = {"setup": [], "watch": [], "no": []}
-
-    if not btc_ok:
-        send(f"🔴 <b>{btc_desc}</b>\nNuk skanohet kur BTC është bearish.")
-        return
-
-    for sym in SYMBOLS:
-        coin = sym.replace("USDT","")
-        try:
-            url4 = f"https://api.binance.com/api/v3/klines?symbol={sym}&interval=4h&limit=50"
-            urld = f"https://api.binance.com/api/v3/klines?symbol={sym}&interval=1d&limit=25"
-            with urlopen(url4, timeout=8) as r: d4 = json.loads(r.read())
-            with urlopen(urld, timeout=8) as r: dd = json.loads(r.read())
-
-            c4 = [float(k[4]) for k in d4]
-            o4 = [float(k[1]) for k in d4]
-            l4 = [float(k[3]) for k in d4]
-            h4 = [float(k[2]) for k in d4]
-            cd = [float(k[4]) for k in dd]
-
-            ema4h = get_ema(c4); ema4h_prev = get_ema(c4[:-3])
-            emad  = get_ema(cd)
-
-            trend4 = ema4h > ema4h_prev
-            trendd = cd[-1] > emad
-            zone   = ema4h * 0.005
-            inZone = l4[-1] <= ema4h+zone and h4[-1] >= ema4h-zone
-            bounce = inZone and c4[-1] > ema4h and c4[-1] > o4[-1]
-            dist   = round((c4[-1]-ema4h)/ema4h*100, 2)
-
-            if trend4 and trendd and bounce:
-                entry  = round_price(c4[-1])
-                sl     = round_price(min(l4[-2]*0.999, ema4h*0.997))
-                rpt    = entry - sl
-                slpct  = round(rpt/entry*100, 2)
-                if slpct <= 1.5:
-                    tp = round_price(entry + rpt*2)
-                    results["setup"].append(f"<b>{coin}</b> LONG\nEntry: ${entry} | SL: ${sl} (-{slpct}%) | TP: ${tp}\n/alarm {coin} {entry} {sl} {tp}")
-            elif trend4 and trendd and inZone:
-                results["watch"].append(f"{coin} ({dist:+.2f}% nga EMA20)")
-            else:
-                r = "Daily bearish" if not trendd else "4h bearish" if not trend4 else "nuk ka pullback"
-                results["no"].append(f"{coin} ({r})")
-        except:
-            results["no"].append(f"{coin} (gabim)")
-
-    msg = f"{btc_emoji} <b>{btc_desc}</b>\n<b>SKAN EMA20 — {now_cest()}</b>\n\n"
-    if results["setup"]:
-        msg += "✅ SETUP:\n" + "\n\n".join(results["setup"]) + "\n\n"
-    if results["watch"]:
-        msg += "👀 SHIQO KËTA:\n" + " | ".join(results["watch"]) + "\n\n"
-    if not results["setup"] and not results["watch"]:
-        msg += "Nuk ka setup. Prit konsolidim.\n\n"
-    msg += "❌ PA SETUP:\n" + " | ".join(results["no"])
-    send(msg)
+    """Manueller /scan — EMA Sniper 7-Filter (15m + 1H Confluence)."""
+    do_scan(triggered_by_command=True, show_loading=True)
 
 def cmd_alarm(parts):
     if len(parts) < 3:
@@ -486,35 +439,44 @@ def cmd_stoptrade(parts):
 # ── Chart + Scan me Filtër Cilësie ────────────────────────────────────────────
 _sl_alerted = {}
 
-def generate_chart(sym, raw_candles, entry, sl, tp):
-    """Gjeneron PNG 4h candlestick me EMA20 + nivelet entry/SL/TP."""
-    candles = raw_candles[-60:]
-    times   = [pd.Timestamp(int(k[0]), unit='ms') for k in candles]
+def generate_chart(sym, candles_15m_dicts, entry, sl, tp):
+    """Generiert PNG 15m Candlestick-Chart mit EMA20/50/100/200 + Entry/SL/TP-Linien."""
+    from strategy import calc_ema as _ema
+    window  = candles_15m_dicts[-80:]
+    times   = [pd.Timestamp(int(c["t"]), unit="ms") for c in window]
     df = pd.DataFrame({
-        'Open':   [float(k[1]) for k in candles],
-        'High':   [float(k[2]) for k in candles],
-        'Low':    [float(k[3]) for k in candles],
-        'Close':  [float(k[4]) for k in candles],
-        'Volume': [float(k[5]) for k in candles],
+        "Open":   [c["o"] for c in window],
+        "High":   [c["h"] for c in window],
+        "Low":    [c["l"] for c in window],
+        "Close":  [c["c"] for c in window],
+        "Volume": [c["v"] for c in window],
     }, index=pd.DatetimeIndex(times))
 
-    all_closes = [float(k[4]) for k in raw_candles]
-    k_m, e = 2 / 21, all_closes[0]
-    all_emas = []
-    for c in all_closes:
-        e = c * k_m + e * (1 - k_m)
-        all_emas.append(e)
-    ema_s = pd.Series(all_emas[-60:], index=pd.DatetimeIndex(times))
+    all_closes = [c["c"] for c in candles_15m_dicts]
 
-    ap = [mpf.make_addplot(ema_s, color='cyan', width=1.5)]
+    def ema_series(n, color, width=1.2):
+        k, e = 2 / (n + 1), all_closes[0]
+        vals = []
+        for v in all_closes:
+            e = v * k + e * (1 - k)
+            vals.append(e)
+        s = pd.Series(vals[-80:], index=pd.DatetimeIndex(times))
+        return mpf.make_addplot(s, color=color, width=width)
+
+    ap = [
+        ema_series(20,  "#2196F3", 1.8),   # EMA20  blau
+        ema_series(50,  "#FF9800", 1.2),   # EMA50  orange
+        ema_series(100, "#F44336", 1.0),   # EMA100 rot
+        ema_series(200, "#9E9E9E", 1.0),   # EMA200 grau
+    ]
     hl = dict(hlines=[entry, sl, tp],
-              colors=['#3399ff', '#ff4444', '#00cc44'],
-              linewidths=[1.2, 1.2, 1.2], linestyle='--')
+              colors=["#3399ff", "#ff4444", "#00cc44"],
+              linewidths=[1.2, 1.2, 1.2], linestyle="--")
     buf = io.BytesIO()
-    fig, _ = mpf.plot(df, type='candle', style='nightclouds', addplot=ap, hlines=hl,
-                      title=f'\n{sym} – 4h  |  Entry ${entry}  SL ${sl}  TP ${tp}',
+    fig, _ = mpf.plot(df, type="candle", style="nightclouds", addplot=ap, hlines=hl,
+                      title=f"\n{sym} – 15m  |  Entry ${entry}  SL ${sl}  TP ${tp}",
                       figsize=(12, 7), returnfig=True)
-    fig.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#131722')
+    fig.savefig(buf, format="png", dpi=100, bbox_inches="tight", facecolor="#131722")
     plt.close(fig)
     buf.seek(0)
     return buf
@@ -603,121 +565,39 @@ def scan_stocks():
 
 
 def do_scan(triggered_by_command=False, show_loading=True):
-    """BTC Daily+4h EMA20 gatekeeper (Sniper) → coins me filtër cilësie → chart."""
+    """EMA Sniper — 7 Filter (15m + 1H Confluence) → alle 20 Coins → Chart."""
     if triggered_by_command and show_loading:
         send("Duke skanuar... prit.")
 
-    # ── BTC Sniper Filter: Daily + 4h EMA20 ──────────────────────────────────
-    try:
-        url4 = "https://api.binance.com/api/v3/klines?" + urlencode(
-            {"symbol": "BTCUSDT", "interval": "4h", "limit": 50})
-        urld = "https://api.binance.com/api/v3/klines?" + urlencode(
-            {"symbol": "BTCUSDT", "interval": "1d", "limit": 25})
-        with urlopen(url4, timeout=8) as r: d4_btc = json.loads(r.read())
-        with urlopen(urld, timeout=8) as r: dd_btc = json.loads(r.read())
-
-        c4_btc    = [float(k[4]) for k in d4_btc]
-        cd_btc    = [float(k[4]) for k in dd_btc]
-        ema4h     = get_ema(c4_btc)
-        emad      = get_ema(cd_btc)
-        btc_price = round(c4_btc[-1], 2)
-        bull_4h   = c4_btc[-1] > ema4h
-        bull_d    = cd_btc[-1]  > emad
-    except Exception:
-        if triggered_by_command:
-            send("Gabim: nuk arrita të marr të dhënat e BTC.")
-        return
-
-    if not (bull_4h and bull_d):
-        if triggered_by_command:
-            tick_4h = "✅" if bull_4h else "❌"
-            tick_d  = "✅" if bull_d  else "❌"
-            send(
-                f"🎯 <b>SNIPER — kripto në pritje</b>\n"
-                f"BTC: <b>${btc_price}</b>\n"
-                f"  Daily EMA20 {tick_d}  ${round(emad,2)}\n"
-                f"  4h EMA20    {tick_4h}  ${round(ema4h,2)}\n\n"
-                f"<i>🏦 Kripto në pritje. Skanim i bursës aktive...</i>"
-            )
-        scan_stocks()
-        return
-
-    setups, watch = [], []
-
-    for sym in SYMBOLS:
-        if sym == "BTCUSDT":
-            continue
-        coin = sym.replace("USDT", "")
-        try:
-            url4 = "https://api.binance.com/api/v3/klines?" + urlencode(
-                {"symbol": sym, "interval": "4h", "limit": 60})
-            urld = "https://api.binance.com/api/v3/klines?" + urlencode(
-                {"symbol": sym, "interval": "1d", "limit": 25})
-            with urlopen(url4, timeout=8) as r: d4 = json.loads(r.read())
-            with urlopen(urld, timeout=8) as r: dd = json.loads(r.read())
-
-            c4 = [float(k[4]) for k in d4]
-            o4 = [float(k[1]) for k in d4]
-            l4 = [float(k[3]) for k in d4]
-            h4 = [float(k[2]) for k in d4]
-            v4 = [float(k[5]) for k in d4]
-            cd = [float(k[4]) for k in dd]
-
-            ema4h      = get_ema(c4)
-            ema4h_prev = get_ema(c4[:-3])
-            emad       = get_ema(cd)
-            candle_ts  = str(d4[-1][0])
-
-            trend4 = ema4h > ema4h_prev
-            trendd = cd[-1] > emad
-            zone   = ema4h * 0.005
-            inZone = l4[-1] <= ema4h + zone and h4[-1] >= ema4h - zone
-            bounce = inZone and c4[-1] > ema4h and c4[-1] > o4[-1]
-            dist   = round((c4[-1] - ema4h) / ema4h * 100, 2)
-
-            if trend4 and trendd and bounce:
-                entry = round_price(c4[-1])
-                sl    = round_price(min(l4[-2] * 0.999, ema4h * 0.997))
-                rpt   = entry - sl
-
-                # Filtrat e cilësisë
-                if sl >= ema4h: continue  # SL mbi EMA — setup i keq
-                candle_range = h4[-1] - l4[-1]
-                body_ratio   = (c4[-1] - o4[-1]) / candle_range if candle_range > 0 else 0
-                if body_ratio < 0.3: continue  # kandelë indecisive
-                vol_avg = sum(v4[:-1]) / len(v4[:-1])
-                if v4[-1] < vol_avg * 0.6: continue  # volum shumë i dobët
-
-                slpct     = round(rpt / entry * 100, 2)
-                alert_key = f"{sym}_{candle_ts}"
-                if slpct <= 1.5 and _sl_alerted.get(sym) != alert_key:
-                    _sl_alerted[sym] = alert_key
-                    tp    = round_price(entry + rpt * 2)
-                    tppct = round(rpt * 2 / entry * 100, 2)
-                    chart = generate_chart(sym, d4, entry, sl, tp)
-                    setups.append({"coin": coin, "entry": entry, "sl": sl, "tp": tp,
-                                   "slpct": slpct, "tppct": tppct, "chart": chart})
-
-            elif trend4 and trendd and inZone:
-                watch.append(f"{coin} ({dist:+.2f}%)")
-
-        except Exception:
-            pass
+    equity  = get_equity()
+    setups, watch, _ = scan_all_symbols(SYMBOLS, equity=equity)
 
     now = now_cest()
     if setups:
         for s in setups:
-            caption = (f"<b>{s['coin']} LONG  |  BTC ✅  |  {now}</b>\n"
-                       f"Entry: ${s['entry']}  |  SL: ${s['sl']} (-{s['slpct']}%)  "
-                       f"|  TP: ${s['tp']} (+{s['tppct']}%)\n"
-                       f"/alarm {s['coin']} {s['entry']} {s['sl']} {s['tp']}")
-            send_photo(s["chart"], caption=caption)
+            alert_key = f"{s['symbol']}_{s['entry']}"
+            if _sl_alerted.get(s["symbol"]) == alert_key:
+                continue
+            _sl_alerted[s["symbol"]] = alert_key
+
+            chart   = generate_chart(s["symbol"], s["candles_15m"], s["entry"], s["sl"], s["tp"])
+            htf_tag = "1H ✅" if s["htf_bull"] else "1H ⚠️"
+            caption = (
+                f"<b>{s['coin']} LONG  |  {htf_tag}  |  {now}</b>\n"
+                f"Entry: ${s['entry']}  |  SL: ${s['sl']} (-{s['sl_pct']}%)"
+                f"  |  TP: ${s['tp']} (+{s['tp_pct']}%)\n"
+                f"RSI: {s['rsi']}  |  ADX: {s['adx']}"
+                f"  |  Risiko: ${s['risk_usd']}\n"
+                f"/alarm {s['coin']} {s['entry']} {s['sl']} {s['tp']}"
+            )
+            send_photo(chart, caption=caption)
     elif triggered_by_command:
-        msg = f"🎯 <b>Skan — {now}  |  BTC ✅</b>\nAsnjë setup që plotëson 100% kushtet."
-        if watch:
-            msg += f"\n👀 Afër EMA20: {' | '.join(watch)}"
+        watch_str = " | ".join(f"{w['coin']} ({w['dist_pct']:+.2f}%)" for w in watch)
+        msg = f"🎯 <b>EMA Sniper — {now}</b>\nKein Setup (alle 7 Filter bestanden von keinem Coin)."
+        if watch_str:
+            msg += f"\n👀 Beobachten: {watch_str}"
         send(msg)
-    # Nëse auto-scan dhe pa setup → heshtje totale
+    # Kein Setup + Auto-Scan → totale Stille
 
 # ── Morning Briefing (09:00 CEST) ────────────────────────────────────────────
 _briefing_done = set()  # dedup per day: {"2026-05-15"}
@@ -898,97 +778,48 @@ SCAN_SCHEDULE = [
 ]
 
 def cmd_scan_typed(scan_type):
-    """Scan me filtër BTC Boss dhe prefix sipas orës."""
+    """Geplanter Scan (09:00 / 16:00 / 17:30 CEST) mit EMA Sniper 7-Filter."""
     send("Duke skanuar... prit.")
 
-    # ── BTC Boss Filtër ───────────────────────────────────────────────────────
-    btc_ok, btc_emoji, btc_desc = get_btc_status()
-
     if scan_type == "fruehwarnung":
-        prefix = "⚠️ PARALAJMËRIM 16:00 — mos hyr ende!\nVëzhgo këta coins për 17:30:"
-        hint   = "Kontrolli tjetër: 17:30 për sinjal final."
+        prefix = "⚠️ FRÜHWARNUNG 16:00 — noch nicht einsteigen!\nBeobachte für 17:30:"
+        hint   = "Nächster Check: 17:30 für finales Signal."
     elif scan_type == "signal":
-        prefix = "✅ SINJAL 17:30 — Setup i konfirmuar:"
-        hint   = "Vendos alarmin: /alarm COIN entry sl tp"
+        prefix = "✅ SIGNAL 17:30 — Setup bestätigt:"
+        hint   = "Alarm setzen: /alarm COIN entry sl tp"
     else:
-        prefix = "🌅 SKAN MËNGJESIT 09:00:"
-        hint   = "Skanet tjera: 16:00 (paralajmërim) & 17:30 (sinjal)"
+        prefix = "🌅 MORGEN-SCAN 09:00:"
+        hint   = "Weitere Scans: 16:00 (Frühwarnung) & 17:30 (Signal)"
 
-    # Nëse BTC Bearish → nuk skanojmë altcoins
-    if not btc_ok:
-        send(
-            f"{btc_emoji} <b>{btc_desc}</b>\n"
-            f"{'─'*28}\n"
-            f"Boti nuk skanon altcoins kur BTC është bearish.\n"
-            f"Prit që BTC të kthehet mbi EMA20 dhe provo sërish."
+    equity = get_equity()
+    setups, watch, _ = scan_all_symbols(SYMBOLS, equity=equity)
+
+    if not setups:
+        return  # Totale Stille wenn kein Setup
+
+    now = now_cest()
+    lines = []
+    for s in setups:
+        lines.append(
+            f"<b>{s['coin']}</b> LONG\n"
+            f"Entry: ${s['entry']} | SL: ${s['sl']} (-{s['sl_pct']}%) | TP: ${s['tp']} (+{s['tp_pct']}%)\n"
+            f"RSI: {s['rsi']} | ADX: {s['adx']} | 1H: {'✅' if s['htf_bull'] else '⚠️'}\n"
+            f"/alarm {s['coin']} {s['entry']} {s['sl']} {s['tp']}"
         )
-        return
 
-    results  = {"setup": [], "watch": [], "no": []}
-    vol_rank = []  # për "Bester Kandidat" 17:30
+    msg = f"<b>{prefix}</b>\n{'─'*28}\n\n" + "\n\n".join(lines)
 
-    for sym in SYMBOLS:
-        coin = sym.replace("USDT","")
-        try:
-            url4 = f"https://api.binance.com/api/v3/klines?symbol={sym}&interval=4h&limit=50"
-            urld = f"https://api.binance.com/api/v3/klines?symbol={sym}&interval=1d&limit=25"
-            with urlopen(url4, timeout=8) as r: d4 = json.loads(r.read())
-            with urlopen(urld, timeout=8) as r: dd = json.loads(r.read())
+    # Bester Kandidat (höchster ADX) beim 17:30 Signal-Scan
+    if scan_type == "signal":
+        best = max(setups, key=lambda x: x["adx"])
+        msg += (
+            f"\n\n{'─'*28}\n"
+            f"🏆 <b>Bester Kandidat: {best['coin']}</b>  "
+            f"ADX: <b>{best['adx']}</b>  RSI: {best['rsi']}\n"
+            f"{'─'*28}"
+        )
 
-            c4 = [float(k[4]) for k in d4]
-            o4 = [float(k[1]) for k in d4]
-            l4 = [float(k[3]) for k in d4]
-            h4 = [float(k[2]) for k in d4]
-            v4 = [float(k[5]) for k in d4]
-            cd = [float(k[4]) for k in dd]
-
-            ema4h = get_ema(c4); ema4h_prev = get_ema(c4[:-3])
-            emad  = get_ema(cd)
-
-            trend4  = ema4h > ema4h_prev
-            trendd  = cd[-1] > emad
-            zone    = ema4h * 0.005
-            inZone  = l4[-1] <= ema4h+zone and h4[-1] >= ema4h-zone
-            bounce  = inZone and c4[-1] > ema4h and c4[-1] > o4[-1]
-            dist    = round((c4[-1]-ema4h)/ema4h*100, 2)
-            vol_avg = sum(v4[:-1]) / len(v4[:-1])
-            vol_rel = round(v4[-1] / vol_avg, 2)  # >1 = überdurchschnittlich
-
-            if trend4 and trendd and bounce:
-                entry  = round_price(c4[-1])
-                sl     = round_price(min(l4[-2]*0.999, ema4h*0.997))
-                rpt    = entry - sl
-                slpct  = round(rpt/entry*100, 2)
-                if slpct <= 1.5:
-                    tp = round_price(entry + rpt*2)
-                    results["setup"].append(
-                        f"<b>{coin}</b> LONG\nEntry: ${entry} | SL: ${sl} (-{slpct}%) | TP: ${tp}\n"
-                        f"/alarm {coin} {entry} {sl} {tp}"
-                    )
-                    vol_rank.append((coin, vol_rel, "setup"))
-            elif trend4 and trendd and inZone:
-                results["watch"].append(f"{coin} ({dist:+.2f}%)")
-                vol_rank.append((coin, vol_rel, "watch"))
-            else:
-                r = "Daily bear" if not trendd else "4h bear" if not trend4 else "kein PB"
-                results["no"].append(f"{coin} ({r})")
-        except:
-            results["no"].append(f"{coin} (Fehler)")
-
-    # Heshtje totale nëse nuk ka setup
-    if not results["setup"]:
-        return
-
-    msg = f"{btc_emoji} <b>{btc_desc}</b>\n<b>{prefix}</b>\n{'─'*28}\n\n"
-    msg += "SETUPS:\n" + "\n\n".join(results["setup"]) + "\n\n"
-
-    # Bester Kandidat nur beim 17:30 Signal-Scan
-    if scan_type == "signal" and vol_rank:
-        best = max(vol_rank, key=lambda x: x[1])
-        coin_b, vol_b, typ_b = best
-        msg += f"{'─'*28}\n🏆 <b>Kandidati më i mirë: {coin_b}</b>\nVolumi: <b>{vol_b}x mesatare</b>\n{'─'*28}\n\n"
-
-    msg += f"<i>{hint}</i>"
+    msg += f"\n\n<i>{hint}</i>"
     send(msg)
 
 def maybe_run_scheduled_scans():
