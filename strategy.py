@@ -157,6 +157,77 @@ def get_binance_usdt_balance(api_key: str, api_secret: str, fallback: float = 0.
     return fallback
 
 
+# ── Order Execution ────────────────────────────────────────────────────────────
+def get_symbol_filters(symbol: str) -> dict:
+    """Holt LOT_SIZE (stepSize), PRICE_FILTER (tickSize) und MIN_NOTIONAL."""
+    resp = requests.get(
+        "https://api.binance.com/api/v3/exchangeInfo",
+        params={"symbol": symbol}, timeout=10
+    )
+    result = {"step_size": 0.00001, "tick_size": 0.01, "min_notional": 10.0}
+    for f in resp.json()["symbols"][0]["filters"]:
+        if f["filterType"] == "LOT_SIZE":
+            result["step_size"] = float(f["stepSize"])
+        elif f["filterType"] == "PRICE_FILTER":
+            result["tick_size"] = float(f["tickSize"])
+        elif f["filterType"] in ("MIN_NOTIONAL", "NOTIONAL"):
+            result["min_notional"] = float(f.get("minNotional", f.get("notional", 10.0)))
+    return result
+
+def _floor_step(qty: float, step: float) -> float:
+    import math
+    if step <= 0:
+        return qty
+    decimals = max(0, len(f"{step:.10f}".rstrip("0").split(".")[-1]))
+    return round(math.floor(qty / step) * step, decimals)
+
+def _round_tick(price: float, tick: float) -> float:
+    if tick <= 0:
+        return price
+    decimals = max(0, len(f"{tick:.10f}".rstrip("0").split(".")[-1]))
+    return round(round(price / tick) * tick, decimals)
+
+def execute_trade(symbol: str, entry: float, sl: float, tp: float,
+                  equity: float, api_key: str, api_secret: str) -> dict:
+    """
+    Market Buy + OCO Sell (SL + TP) in einem Aufruf.
+    Positionsgrösse = 1% Risiko / SL-Abstand.
+
+    Returns: {"ok": True, "qty": float, ...} oder {"ok": False, "error": str}
+    """
+    try:
+        filters      = get_symbol_filters(symbol)
+        step_size    = filters["step_size"]
+        tick_size    = filters["tick_size"]
+        min_notional = filters["min_notional"]
+
+        sl_dist = entry - sl
+        if sl_dist <= 0:
+            return {"ok": False, "error": "SL >= Entry"}
+
+        qty = _floor_step((equity * 0.01) / sl_dist, step_size)
+        if qty * entry < min_notional:
+            return {"ok": False, "error": f"Zu klein: ${qty * entry:.2f} < min ${min_notional}"}
+
+        buy        = _binance_signed("POST", "/api/v3/order", {
+            "symbol": symbol, "side": "BUY", "type": "MARKET", "quantity": qty,
+        }, api_key, api_secret)
+        filled_qty = _floor_step(float(buy.get("executedQty", qty)), step_size)
+
+        tp_price = _round_tick(tp, tick_size)
+        sl_price = _round_tick(sl, tick_size)
+        sl_limit = _round_tick(sl * 0.999, tick_size)
+
+        oco = _binance_signed("POST", "/api/v3/orderList/oco", {
+            "symbol": symbol, "side": "SELL", "quantity": filled_qty,
+            "price": tp_price, "stopPrice": sl_price,
+            "stopLimitPrice": sl_limit, "stopLimitTimeInForce": "GTC",
+        }, api_key, api_secret)
+
+        return {"ok": True, "qty": filled_qty, "buy_order": buy, "oco_order": oco}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 # ── Binance Daten ──────────────────────────────────────────────────────────────
 def get_candles(symbol: str, interval: str, limit: int = 300) -> list:
     """
