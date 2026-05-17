@@ -602,9 +602,9 @@ def scan_stocks():
     send(msg)
 
 
-def do_scan(triggered_by_command=False):
+def do_scan(triggered_by_command=False, show_loading=True):
     """BTC Daily+4h EMA20 gatekeeper (Sniper) → coins me filtër cilësie → chart."""
-    if triggered_by_command:
+    if triggered_by_command and show_loading:
         send("Duke skanuar... prit.")
 
     # ── BTC Sniper Filter: Daily + 4h EMA20 ──────────────────────────────────
@@ -632,16 +632,12 @@ def do_scan(triggered_by_command=False):
         if triggered_by_command:
             tick_4h = "✅" if bull_4h else "❌"
             tick_d  = "✅" if bull_d  else "❌"
-            reason  = []
-            if not bull_d:  reason.append(f"Daily EMA20: ${round(emad,2)} — çmimi nën të")
-            if not bull_4h: reason.append(f"4h EMA20:    ${round(ema4h,2)} — çmimi nën të")
             send(
                 f"🎯 <b>SNIPER — kripto në pritje</b>\n"
                 f"BTC: <b>${btc_price}</b>\n"
                 f"  Daily EMA20 {tick_d}  ${round(emad,2)}\n"
                 f"  4h EMA20    {tick_4h}  ${round(ema4h,2)}\n\n"
-                f"📋 {chr(10).join(reason)}\n\n"
-                f"<i>🏦 Kripto në pritje. Skanim i bursës (Stock Market) aktive...</i>"
+                f"<i>🏦 Kripto në pritje. Skanim i bursës aktive...</i>"
             )
         scan_stocks()
         return
@@ -860,8 +856,8 @@ def morning_briefing(force=False):
     else:
         send(text_part)
 
-    # Bubble 2: rezultati i skanimit (setup chart OSE status — 1 bubble)
-    do_scan(triggered_by_command=True)
+    # Bubble 2: rezultati i skanimit (setup chart OSE status — 1 bubble, pa "Duke skanuar...")
+    do_scan(triggered_by_command=True, show_loading=False)
 
 
 _last_auto_scan = 0.0
