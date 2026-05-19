@@ -63,7 +63,7 @@ BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
 # AUTO_TRADE=true  → sofort ausführen ohne Bestätigung
 # AUTO_TRADE=false → 2-Minuten-Fenster, /trade COIN bestätigt den Trade
 AUTO_TRADE = os.environ.get("AUTO_TRADE", "false").lower() == "true"
-CONFIRM_WINDOW_SEC = 120  # Sekunden bis Alert abläuft
+CONFIRM_WINDOW_SEC = 300  # Sekunden bis Buttons ablaufen (5 Minuten)
 
 # Pending Setups: {symbol: {"entry", "sl", "tp", "equity", "expires", "coin"}}
 _pending_setups: dict = {}
@@ -282,17 +282,26 @@ def cmd_status():
 def cmd_hilfe():
     send(
         "<b>GianniTGT Trading Bot 🤖</b>\n\n"
-        "/status — Gjendja e plotë (BTC + Bursa + Alarme)\n"
-        "/scan — Skano 20 coins (EMA20)\n"
-        "/briefing — ETF flows + heatmap + news + setups\n"
-        "/price BNB — Çmimi aktual\n"
-        "/alarm BNB 674.50 663.20 685 — Vendos alarm\n"
-        "/alarme — Shiko alarmet aktive\n"
-        "/stop BNB — Fshij alarmin\n\n"
-        "/trade BNB 674.50 663.20 685 — Monitoro trade aktiv\n"
-        "/trades — Shiko të gjitha trades\n"
-        "/stoptrade BNB — Ndalо monitorimin\n\n"
-        "/hilfe — Kjo listë"
+        "📡 <b>Automatische Scans (CEST):</b>\n"
+        "  09:00 — Morgenbriefing (Markt + Sentiment + Scan)\n"
+        "  16:00 — Coin-Screener (Status vor heißer Phase)\n"
+        "  16:45 — Post-NY Signal (nach NY-Eröffnungsvolatilität)\n"
+        "  alle 20 Min — Stiller Hintergrund-Scan\n\n"
+        "📊 <b>Coins:</b> ATOM · LINK · BNB · DOT · SUI · INJ · APT\n\n"
+        "/scan — Manueller EMA-Sniper-Scan (7/7 Filter)\n"
+        "/briefing — Morgenbriefing manuell auslösen\n"
+        "/price BNB — Aktueller Preis\n"
+        "/status — Bot-Status\n\n"
+        "/alarm BNB 674.50 663.20 685 — Preisalarm setzen\n"
+        "/alarme — Aktive Alarme anzeigen\n"
+        "/stop BNB — Alarm löschen\n\n"
+        "/trade BNB 674.50 663.20 685 — Trade manuell überwachen\n"
+        "/trades — Aktive Trades anzeigen\n"
+        "/stoptrade BNB — Trade-Überwachung stoppen\n\n"
+        "/hilfe — Diese Liste\n\n"
+        "<i>Bei einem Signal erscheinen zwei Buttons:\n"
+        "  [JA, TRADEN 🚀] → Order wird platziert\n"
+        "  [NEIN, ABLEHNEN ❌] → Setup verworfen</i>"
     )
 
 def cmd_price(parts):
@@ -535,12 +544,28 @@ def generate_chart(sym, candles_15m_dicts, entry, sl, tp):
     return buf
 
 def send_photo(buf, caption=""):
-    """Dërgon foto në Telegram; fallback me tekst nëse dështon."""
+    """Schickt Foto per Telegram; Fallback Text wenn Fehler."""
     url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
     try:
         _req.post(url,
                   data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "HTML"},
                   files={"photo": ("chart.png", buf, "image/png")}, timeout=30)
+    except Exception:
+        send(caption)
+
+def send_photo_with_buttons(buf, caption, symbol):
+    """Schickt Chart-Foto mit JA/NEIN Inline-Buttons zur Trade-Bestätigung."""
+    url    = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+    markup = json.dumps({"inline_keyboard": [[
+        {"text": "JA, TRADEN 🚀",    "callback_data": f"trade_yes_{symbol}"},
+        {"text": "NEIN, ABLEHNEN ❌", "callback_data": f"trade_no_{symbol}"},
+    ]]})
+    try:
+        _req.post(url,
+                  data={"chat_id": CHAT_ID, "caption": caption,
+                        "parse_mode": "HTML", "reply_markup": markup},
+                  files={"photo": ("chart.png", buf, "image/png")},
+                  timeout=30)
     except Exception:
         send(caption)
 
@@ -635,15 +660,49 @@ def _fire_trade(symbol: str, coin: str, entry: float, sl: float, tp: float,
         send(f"❌ <b>{coin} Order fehlgeschlagen:</b> {result['error']}")
 
 
-def do_scan(triggered_by_command=False, show_loading=True):
-    """EMA Sniper — 7 Filter (15m + 1H) → Alert → 2-min Bestätigung oder AUTO_TRADE."""
+def handle_callback_query(cq):
+    """Verarbeitet Button-Klicks (JA 🚀 / NEIN ❌) aus Trade-Alerts."""
+    cq_id  = cq["id"]
+    data   = cq.get("data", "")
+    # Telegram erwartet immer eine Antwort auf callback_query
+    tg("answerCallbackQuery", callback_query_id=cq_id, text="✅")
+
+    if data.startswith("trade_yes_"):
+        symbol = data[len("trade_yes_"):]
+        now    = time.time()
+        p      = _pending_setups.pop(symbol, None)
+        if p is None:
+            send("⏰ Setup nicht mehr verfügbar — abgelaufen oder bereits ausgeführt.")
+            return
+        if p["expires"] < now:
+            send(f"⏰ <b>{p['coin']}</b>: Fenster abgelaufen. Setup nicht mehr gültig.")
+            return
+        send(f"⚡ <b>{p['coin']}</b> bestätigt — platziere Order...")
+        threading.Thread(
+            target=_fire_trade,
+            args=(symbol, p["coin"], p["entry"], p["sl"], p["tp"],
+                  p["sl_pct"], p["tp_pct"], p["equity"]),
+            daemon=True
+        ).start()
+
+    elif data.startswith("trade_no_"):
+        symbol = data[len("trade_no_"):]
+        p      = _pending_setups.pop(symbol, None)
+        coin   = p["coin"] if p else symbol.replace("USDT", "")
+        send(f"❌ <b>{coin}</b> abgelehnt — kein Trade.")
+
+
+def do_scan(triggered_by_command=False, show_loading=True, scan_label=""):
+    """EMA Sniper — 7 Filter (15m + 1H) → Chart + JA/NEIN Buttons → Trade bei Klick."""
     if triggered_by_command and show_loading:
-        send("Duke skanuar... prit.")
+        send("🔍 Scanne Markt... bitte warten.")
 
     equity  = get_equity()
     setups, watch, _ = scan_all_symbols(SYMBOLS, equity=equity)
 
-    now = now_cest()
+    now    = now_cest()
+    header = f"{scan_label}  |  " if scan_label else ""
+
     if setups:
         for s in setups:
             alert_key = f"{s['symbol']}_{s['entry']}"
@@ -655,9 +714,9 @@ def do_scan(triggered_by_command=False, show_loading=True):
             htf_tag = "1H ✅" if s["htf_bull"] else "1H ⚠️"
 
             if AUTO_TRADE:
-                # Vollautomatisch — sofort ausführen
+                # Vollautomatisch (AUTO_TRADE=true in Railway) — sofort ausführen
                 caption = (
-                    f"🤖 <b>EMA SNIPER {s['coin']} 15m  |  {htf_tag}  |  {now}</b>\n"
+                    f"🤖 <b>EMA SNIPER {s['coin']} 15m  |  {htf_tag}  |  {header}{now}</b>\n"
                     f"Entry: ${s['entry']}  |  SL: ${s['sl']} (-{s['sl_pct']}%)"
                     f"  |  TP: ${s['tp']} (+{s['tp_pct']}%)\n"
                     f"RSI: {s['rsi']}  |  ADX: {s['adx']}  |  Filters: 7/7 ✅\n"
@@ -671,7 +730,7 @@ def do_scan(triggered_by_command=False, show_loading=True):
                     daemon=True
                 ).start()
             else:
-                # Semi-automatisch — 2-Minuten-Bestätigungsfenster
+                # Phase 1: Button-Bestätigung — JA = Trade, NEIN = Ablehnen
                 _pending_setups[s["symbol"]] = {
                     "coin":    s["coin"],
                     "entry":   s["entry"],
@@ -683,21 +742,21 @@ def do_scan(triggered_by_command=False, show_loading=True):
                     "expires": time.time() + CONFIRM_WINDOW_SEC,
                 }
                 caption = (
-                    f"🎯 <b>EMA SNIPER {s['coin']} 15m  |  {htf_tag}  |  {now}</b>\n"
+                    f"🎯 <b>EMA SNIPER {s['coin']} 15m  |  {htf_tag}  |  {header}{now}</b>\n"
                     f"Entry: ${s['entry']}  |  SL: ${s['sl']} (-{s['sl_pct']}%)"
                     f"  |  TP: ${s['tp']} (+{s['tp_pct']}%)\n"
                     f"RSI: {s['rsi']}  |  ADX: {s['adx']}  |  Filters: 7/7 ✅\n"
-                    f"⏱ <b>2 Minuten:</b>  /trade {s['coin']}  um auszuführen"
+                    f"👇 <b>Möchtest du diesen Trade ausführen?</b>"
                 )
-                send_photo(chart, caption=caption)
+                send_photo_with_buttons(chart, caption=caption, symbol=s["symbol"])
 
     elif triggered_by_command:
-        watch_str = " | ".join(f"{w['coin']} ({w['dist_pct']:+.2f}%)" for w in watch)
-        msg = f"🎯 <b>EMA Sniper — {now}</b>\nKein Setup — alle 7 Filter von keinem Coin erfüllt."
+        watch_str = "  |  ".join(f"{w['coin']} ({w['dist_pct']:+.2f}%)" for w in watch)
+        msg = f"🎯 <b>EMA Sniper — {header}{now}</b>\nKein Setup — alle 7 Filter von keinem Coin erfüllt."
         if watch_str:
-            msg += f"\n👀 Beobachten: {watch_str}"
+            msg += f"\n👀 <b>Beobachten:</b> {watch_str}"
         send(msg)
-    # Kein Setup + Auto-Scan → totale Stille
+    # Kein Setup + Hintergrund-Scan → totale Stille
 
 # ── Morning Briefing (09:00 CEST) ────────────────────────────────────────────
 _briefing_done = set()  # dedup per day: {"2026-05-15"}
@@ -872,72 +931,39 @@ def check_inbox():
 _scans_done = set()  # z.B. {"2026-05-15_09", "2026-05-15_16", "2026-05-15_17"}
 
 SCAN_SCHEDULE = [
-    (9,  0,  "morgen"),
-    (16, 0,  "fruehwarnung"),
-    (17, 30, "signal"),
+    (9,  0,  "morgen"),    # 09:00 — Morgenbriefing
+    (16, 0,  "screener"),  # 16:00 — Coin-Screener (vor heißer Phase)
+    (16, 45, "signal"),    # 16:45 — Post-NY-Signal (nach NY-Eröffnungsvolatilität)
 ]
 
-def cmd_scan_typed(scan_type):
-    """Geplanter Scan (09:00 / 16:00 / 17:30 CEST) mit EMA Sniper 7-Filter."""
-    send("Duke skanuar... prit.")
-
-    if scan_type == "fruehwarnung":
-        prefix = "⚠️ FRÜHWARNUNG 16:00 — noch nicht einsteigen!\nBeobachte für 17:30:"
-        hint   = "Nächster Check: 17:30 für finales Signal."
-    elif scan_type == "signal":
-        prefix = "✅ SIGNAL 17:30 — Setup bestätigt:"
-        hint   = "Alarm setzen: /alarm COIN entry sl tp"
-    else:
-        prefix = "🌅 MORGEN-SCAN 09:00:"
-        hint   = "Weitere Scans: 16:00 (Frühwarnung) & 17:30 (Signal)"
-
-    equity = get_equity()
-    setups, watch, _ = scan_all_symbols(SYMBOLS, equity=equity)
-
-    if not setups:
-        return  # Totale Stille wenn kein Setup
-
-    now = now_cest()
-    lines = []
-    for s in setups:
-        lines.append(
-            f"<b>{s['coin']}</b> LONG\n"
-            f"Entry: ${s['entry']} | SL: ${s['sl']} (-{s['sl_pct']}%) | TP: ${s['tp']} (+{s['tp_pct']}%)\n"
-            f"RSI: {s['rsi']} | ADX: {s['adx']} | 1H: {'✅' if s['htf_bull'] else '⚠️'}\n"
-            f"/alarm {s['coin']} {s['entry']} {s['sl']} {s['tp']}"
-        )
-
-    msg = f"<b>{prefix}</b>\n{'─'*28}\n\n" + "\n\n".join(lines)
-
-    # Bester Kandidat (höchster ADX) beim 17:30 Signal-Scan
-    if scan_type == "signal":
-        best = max(setups, key=lambda x: x["adx"])
-        msg += (
-            f"\n\n{'─'*28}\n"
-            f"🏆 <b>Bester Kandidat: {best['coin']}</b>  "
-            f"ADX: <b>{best['adx']}</b>  RSI: {best['rsi']}\n"
-            f"{'─'*28}"
-        )
-
-    msg += f"\n\n<i>{hint}</i>"
-    send(msg)
-
 def maybe_run_scheduled_scans():
+    """Prüft jede Minute ob ein geplanter Scan fällig ist (09:00 / 16:00 / 16:45 CEST)."""
     global _scans_done
-    now = datetime.utcnow()
-    # CEST = UTC+2
-    cest_hour   = (now.hour + 2) % 24
-    cest_minute = now.minute
-    day_key     = now.strftime("%Y-%m-%d")
+    now_dt      = datetime.utcnow()
+    cest_hour   = (now_dt.hour + 2) % 24
+    cest_minute = now_dt.minute
+    day_key     = now_dt.strftime("%Y-%m-%d")
 
     for h, m, scan_type in SCAN_SCHEDULE:
-        key = f"{day_key}_{h}"
-        if cest_hour == h and cest_minute < 3 and key not in _scans_done:
+        key = f"{day_key}_{h}_{m}"
+        # 3-Minuten-Fenster — falls Loop den exakten Tick verpasst
+        in_window = (cest_hour == h) and (m <= cest_minute < m + 3)
+        if in_window and key not in _scans_done:
             _scans_done.add(key)
             if scan_type == "morgen":
                 threading.Thread(target=morning_briefing, daemon=True).start()
-            else:
-                threading.Thread(target=cmd_scan_typed, args=(scan_type,), daemon=True).start()
+            elif scan_type == "screener":
+                threading.Thread(
+                    target=do_scan,
+                    args=(True, True, "📊 16:00 COIN-SCREENER"),
+                    daemon=True
+                ).start()
+            elif scan_type == "signal":
+                threading.Thread(
+                    target=do_scan,
+                    args=(True, True, "🎯 16:45 POST-NY SIGNAL"),
+                    daemon=True
+                ).start()
 
 def run_auto_scan_loop():
     while True:
@@ -978,6 +1004,14 @@ def main():
                 msg    = u.get("message", {})
                 text   = msg.get("text", "").strip()
                 cid    = str(msg.get("chat", {}).get("id", ""))
+
+                # ── Button-Klick (JA / NEIN) ──────────────────────────────────
+                if "callback_query" in u:
+                    cq  = u["callback_query"]
+                    cid = str(cq.get("message", {}).get("chat", {}).get("id", ""))
+                    if cid == CHAT_ID:
+                        handle_callback_query(cq)
+                    continue
 
                 if cid != CHAT_ID: continue
                 if not text.startswith("/"): continue
