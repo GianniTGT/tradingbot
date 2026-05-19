@@ -214,68 +214,69 @@ def round_price(v):
 
 # ── Befehle ───────────────────────────────────────────────────────────────────
 def cmd_status():
-    now_dt  = datetime.utcnow() + CEST
-    weekday = now_dt.weekday()
+    now_dt   = datetime.utcnow() + CEST
+    weekday  = now_dt.weekday()
     hour_min = now_dt.hour * 60 + now_dt.minute
-    market_open = weekday < 5 and (15*60) <= hour_min <= (21*60+30)
-    days = ["E Hënë","E Martë","E Mërkurë","E Enjte","E Premte","E Shtunë","E Diel"]
-    day_name = days[weekday]
+    days_de  = ["Montag","Dienstag","Mittwoch","Donnerstag","Freitag","Samstag","Sonntag"]
 
-    # BTC status
-    btc_line = "BTC: duke ngarkuar..."
-    mode_line = ""
-    try:
-        from urllib.request import urlopen
-        url4 = "https://api.binance.com/api/v3/klines?" + urlencode({"symbol":"BTCUSDT","interval":"4h","limit":50})
-        urld = "https://api.binance.com/api/v3/klines?" + urlencode({"symbol":"BTCUSDT","interval":"1d","limit":25})
-        with urlopen(url4, timeout=8) as r: d4 = json.loads(r.read())
-        with urlopen(urld, timeout=8) as r: dd = json.loads(r.read())
-        c4 = [float(k[4]) for k in d4]
-        cd = [float(k[4]) for k in dd]
-        ema4h = get_ema(c4); emad = get_ema(cd)
-        price = round(c4[-1], 2)
-        bull4 = c4[-1] > ema4h; bulld = cd[-1] > emad
-        t4 = "✅" if bull4 else "❌"; td = "✅" if bulld else "❌"
-        btc_line = (f"BTC: <b>${price}</b>\n"
-                    f"  Daily EMA20 {td}  ${round(emad,2)}\n"
-                    f"  4h EMA20    {t4}  ${round(ema4h,2)}")
-        if bull4 and bulld:
-            mode_line = "🎯 Mode: <b>KRIPTO</b> — skanohet"
-        else:
-            mode_line = "🏦 Mode: <b>PLAN B</b> — aksione (nëse tregu hapur)"
-    except:
-        btc_line = "BTC: nuk u arrit"
-
-    # Stock market
-    if weekday >= 5:
-        stock_line = f"📈 Bursa: <b>MBYLLUR</b> ({day_name})"
-    elif market_open:
-        close_h = 21; close_m = 30
-        mins_left = (close_h*60+close_m) - hour_min
-        stock_line = f"📈 Bursa: <b>HAPUR</b> 🟢  mbyllet pas {mins_left//60}h {mins_left%60}min"
+    # ── BTC 1H EMA20 — Plan A oder Plan B ────────────────────────────────────
+    btc_bullish, btc_emoji, btc_desc = get_btc_status()
+    if btc_bullish:
+        mode_line = f"🟢 <b>Plan A — Krypto aktiv</b>\n{btc_desc}"
+        coins_line = "📊 Coins: ATOM · LINK · BNB · DOT · SUI · INJ · APT"
     else:
-        if hour_min < 15*60:
-            mins_to = 15*60 - hour_min
-            stock_line = f"📈 Bursa: <b>MBYLLUR</b> 🔴  hapet pas {mins_to//60}h {mins_to%60}min"
-        else:
-            stock_line = f"📈 Bursa: <b>MBYLLUR</b> 🔴  hapet nesër 15:00"
+        mode_line = f"🔴 <b>Plan B — US-Aktien aktiv</b>\n{btc_desc}"
+        coins_line = "📊 Aktien: AAPL · TSLA · NVDA · MSFT · GOOGL · PG · JNJ"
 
-    # Alarms & Trades
-    alarm_line = f"🔔 Alarme aktive: <b>{len(active_alerts)}</b>"
+    # ── US-Markt Status ───────────────────────────────────────────────────────
+    market_open = weekday < 5 and (15*60+30) <= hour_min <= (21*60+30)
+    if weekday >= 5:
+        market_line = f"📈 US-Markt: <b>GESCHLOSSEN</b> ({days_de[weekday]})"
+    elif market_open:
+        mins_left = (21*60+30) - hour_min
+        market_line = f"📈 US-Markt: <b>OFFEN</b> 🟢  schliesst in {mins_left//60}h {mins_left%60}min"
+    elif hour_min < 15*60+30:
+        mins_to = (15*60+30) - hour_min
+        market_line = f"📈 US-Markt: <b>GESCHLOSSEN</b> 🔴  öffnet in {mins_to//60}h {mins_to%60}min"
+    else:
+        market_line = f"📈 US-Markt: <b>GESCHLOSSEN</b> 🔴  öffnet morgen 15:30"
+
+    # ── Nächste Scans ─────────────────────────────────────────────────────────
+    scan_line = "🕐 Scans: 09:00 Briefing  |  16:00 Screener  |  16:45 Signal  |  alle 20 Min"
+
+    # ── Offene Bestätigungen ──────────────────────────────────────────────────
+    now_ts = time.time()
+    pending_valid = {s: p for s, p in _pending_setups.items() if p["expires"] > now_ts}
+    if pending_valid:
+        pending_line = "⏳ <b>Offene Setups:</b> " + "  |  ".join(
+            f"{p['coin']} (noch {int(p['expires']-now_ts)}s)" for p in pending_valid.values()
+        )
+    else:
+        pending_line = ""
+
+    # ── Alarme & Trades ───────────────────────────────────────────────────────
+    alarm_line = f"🔔 Aktive Alarme: <b>{len(active_alerts)}</b>"
     if active_alerts:
         alarm_line += " — " + ", ".join(s.replace("USDT","") for s in active_alerts)
-    trade_line = f"📊 Trades aktive: <b>{len(active_trades)}</b>"
+    trade_line = f"📊 Aktive Trades: <b>{len(active_trades)}</b>"
     if active_trades:
         trade_line += " — " + ", ".join(s.replace("USDT","") for s in active_trades)
 
-    send(
-        f"📡 <b>STATUS — {now_dt.strftime('%H:%M')} CEST</b>\n{'─'*28}\n\n"
-        f"{btc_line}\n\n"
-        f"{mode_line}\n\n"
-        f"{stock_line}\n\n"
+    auto_line = f"🤖 AUTO_TRADE: <b>{'AN ⚡' if AUTO_TRADE else 'AUS — Button-Bestätigung'}</b>"
+
+    msg = (
+        f"📡 <b>STATUS — {now_dt.strftime('%H:%M')} CEST</b>\n{'─'*30}\n\n"
+        f"{mode_line}\n"
+        f"{coins_line}\n\n"
+        f"{market_line}\n"
+        f"{scan_line}\n\n"
         f"{alarm_line}\n"
-        f"{trade_line}"
+        f"{trade_line}\n"
+        f"{auto_line}"
     )
+    if pending_line:
+        msg += f"\n{pending_line}"
+    send(msg)
 
 
 def cmd_hilfe():
