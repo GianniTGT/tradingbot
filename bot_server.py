@@ -81,29 +81,28 @@ offset = 0
 
 # ── BTC Boss Filter ───────────────────────────────────────────────────────────
 def get_btc_status():
-    """Kontrollon BTC mbi/nën EMA20 në 1h dhe 15m. Kthen (bullish, emoji, pershkrim)."""
-    results = {}
-    for tf in ["1h", "15m"]:
-        try:
-            url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval={tf}&limit=25"
-            with urlopen(url, timeout=8) as r:
-                data = json.loads(r.read())
-            closes = [float(k[4]) for k in data]
-            ema    = get_ema(closes)
-            price  = closes[-1]
-            results[tf] = price > ema
-        except:
-            results[tf] = True  # nëse API dështon, lejo skanimin
-
-    bullish_1h  = results.get("1h",  True)
-    bullish_15m = results.get("15m", True)
-
-    if bullish_1h and bullish_15m:
-        return True,  "🟢", "BTC Bullish (1h + 15m mbi EMA20)"
-    elif bullish_1h and not bullish_15m:
-        return False, "🟡", "BTC Kujdes (15m nën EMA20, 1h ok)"
-    else:
-        return False, "🔴", "BTC Bearish (nën EMA20) — nuk ka skanim"
+    """
+    Prüft BTC 1H EMA20 — bestimmt Plan A vs Plan B.
+    Rückgabe: (bullish: bool, emoji: str, beschreibung: str)
+      True  → Plan A: Krypto-Scan aktiv
+      False → Plan B: Aktien-Scan aktiv
+    """
+    try:
+        url = "https://api.binance.com/api/v3/klines?" + urlencode(
+            {"symbol": "BTCUSDT", "interval": "1h", "limit": 25})
+        with urlopen(url, timeout=8) as r:
+            data = json.loads(r.read())
+        closes  = [float(k[4]) for k in data]
+        ema     = get_ema(closes)
+        price   = closes[-1]
+        bullish = price > ema
+        emoji   = "🟢" if bullish else "🔴"
+        trend   = "über" if bullish else "unter"
+        desc    = f"BTC ${round(price, 0):,.0f} — {trend} 1H EMA20 (${round(ema, 0):,.0f})"
+        return bullish, emoji, desc
+    except Exception:
+        # API-Fehler → Plan A als sicherer Fallback
+        return True, "🟡", "BTC Status nicht verfügbar — Plan A (Krypto) als Fallback"
 
 # ── BTC Emergency Monitor ─────────────────────────────────────────────────────
 _btc_price_last = None
@@ -569,77 +568,101 @@ def send_photo_with_buttons(buf, caption, symbol):
     except Exception:
         send(caption)
 
-def scan_stocks():
-    """Plan B: EMA20 Pullback Daily në aksione tech — thirret kur BTC është Bearish."""
+def scan_stocks(triggered_by_command=False, scan_label=""):
+    """
+    Plan B: Daily EMA20 Pullback auf US-Tech-Aktien.
+    Wird aufgerufen wenn BTC unter der 1H EMA20 ist.
+    Prüft automatisch ob US-Markt geöffnet ist (Mo-Fr, 15:30–21:30 CEST).
+    """
     try:
         import yfinance as yf
     except ImportError:
-        send("⚠️ yfinance nuk është instaluar ende. Railway po përditëson...")
+        if triggered_by_command:
+            send("⚠️ yfinance nicht installiert — Plan B nicht verfügbar.")
         return
 
-    # Kontrollo nëse është brenda orëve të tregut: Mon-Fri, 15:00-21:30 CEST
+    # US-Markt nur Mo-Fr, 15:30–21:30 CEST
     now_cest_dt = datetime.utcnow() + CEST
     weekday     = now_cest_dt.weekday()
     hour_min    = now_cest_dt.hour * 60 + now_cest_dt.minute
-    market_open = weekday < 5 and (15 * 60) <= hour_min <= (21 * 60 + 30)
-    if not market_open:
-        return  # heshtje jashtë orëve të tregut
+    market_open = weekday < 5 and (15 * 60 + 30) <= hour_min <= (21 * 60 + 30)
 
-    setups, watch, no = [], [], []
+    if not market_open:
+        if triggered_by_command:
+            opens_in = ""
+            if weekday < 5 and hour_min < 15 * 60 + 30:
+                mins = (15 * 60 + 30) - hour_min
+                opens_in = f" — öffnet in {mins // 60}h {mins % 60}min"
+            send(
+                f"📈 <b>Plan B — US-Aktien</b>\n"
+                f"BTC unter 1H EMA20 → Aktien-Modus aktiv.\n"
+                f"⏰ US-Markt aktuell geschlossen{opens_in}.\n"
+                f"Scan läuft automatisch ab 15:30 CEST."
+            )
+        return
+
+    now    = now_cest()
+    header = f"{scan_label}  |  " if scan_label else ""
+    setups, watch = [], []
 
     for ticker in STOCK_SYMBOLS:
         try:
             hist = yf.Ticker(ticker).history(period="60d", interval="1d", auto_adjust=True)
             if hist.empty or len(hist) < 22:
-                no.append(f"{ticker} (pa të dhëna)")
                 continue
 
-            closes = [float(x) for x in hist["Close"].tolist()]
-            opens  = [float(x) for x in hist["Open"].tolist()]
-            highs  = [float(x) for x in hist["High"].tolist()]
-            lows   = [float(x) for x in hist["Low"].tolist()]
-            vols   = [float(x) for x in hist["Volume"].tolist()]
+            closes  = [float(x) for x in hist["Close"].tolist()]
+            opens   = [float(x) for x in hist["Open"].tolist()]
+            highs   = [float(x) for x in hist["High"].tolist()]
+            lows    = [float(x) for x in hist["Low"].tolist()]
+            vols    = [float(x) for x in hist["Volume"].tolist()]
 
-            ema     = get_ema(closes)
+            ema      = get_ema(closes)
             ema_prev = get_ema(closes[:-3])
-            trend   = ema > ema_prev
-            cur, opn, hi, lo = closes[-1], opens[-1], highs[-1], lows[-1]
-            zone    = ema * 0.005
-            in_zone = lo <= ema + zone and hi >= ema - zone
-            bounce  = in_zone and cur > ema and cur > opn
-            dist    = round((cur - ema) / ema * 100, 2)
-            vol_avg = sum(vols[:-1]) / len(vols[:-1])
-            vol_ok  = vols[-1] >= vol_avg * 0.6
+            trend    = ema > ema_prev
+            cur, opn = closes[-1], opens[-1]
+            lo, hi   = lows[-1], highs[-1]
+            zone     = ema * 0.005
+            in_zone  = lo <= ema + zone and hi >= ema - zone
+            bounce   = in_zone and cur > ema and cur > opn
+            dist     = round((cur - ema) / ema * 100, 2)
+            vol_avg  = sum(vols[:-1]) / len(vols[:-1])
+            vol_ok   = vols[-1] >= vol_avg * 0.6
 
             if trend and bounce and vol_ok:
                 entry  = round(cur, 2)
                 sl     = round(min(lows[-2] * 0.999, ema * 0.997), 2)
-                rpt    = entry - sl
-                sl_pct = round(rpt / entry * 100, 2)
+                risk   = entry - sl
+                sl_pct = round(risk / entry * 100, 2)
                 if sl_pct <= 2.0 and sl < ema:
-                    tp     = round(entry + rpt * 2, 2)
-                    tp_pct = round(rpt * 2 / entry * 100, 2)
+                    tp     = round(entry + risk * 2, 2)
+                    tp_pct = round(risk * 2 / entry * 100, 2)
                     setups.append(
-                        f"<b>{ticker}</b> LONG (Daily EMA20)\n"
+                        f"<b>{ticker}</b> LONG (Daily EMA20 Pullback)\n"
                         f"Entry: ${entry}  |  SL: ${sl} (-{sl_pct}%)  |  TP: ${tp} (+{tp_pct}%)"
                     )
             elif trend and in_zone:
                 watch.append(f"{ticker} ({dist:+.2f}%)")
-            else:
-                reason = "trend down" if not trend else "nuk ka pullback"
-                no.append(f"{ticker} ({reason})")
-        except Exception as e:
-            no.append(f"{ticker} (gabim)")
+        except Exception:
+            continue
 
-    now = now_cest()
-    # Dërgo vetëm nëse ka setup — heshtje totale nëse jo
-    if not setups:
-        return
-    now = now_cest()
-    msg = (f"📈 <b>PLAN B — AKSIONE  |  {now}</b>\n"
-           f"<i>Kripto në pritje (BTC Bearish)</i>\n{'─'*28}\n\n"
-           f"✅ <b>SETUP:</b>\n" + "\n\n".join(setups))
-    send(msg)
+    if setups:
+        msg = (
+            f"📈 <b>PLAN B — US-AKTIEN  |  {header}{now}</b>\n"
+            f"<i>BTC unter 1H EMA20 — Krypto pausiert</i>\n{'─'*30}\n\n"
+            f"✅ <b>Setup gefunden:</b>\n\n" + "\n\n".join(setups)
+        )
+        if watch:
+            msg += "\n\n👀 <b>Beobachten:</b> " + "  |  ".join(watch)
+        send(msg)
+    elif triggered_by_command:
+        watch_str = "  |  ".join(watch) if watch else "—"
+        send(
+            f"📈 <b>Plan B — US-Aktien  |  {header}{now}</b>\n"
+            f"<i>BTC unter 1H EMA20 — Krypto pausiert</i>\n"
+            f"Kein Setup — kein Pullback auf Daily EMA20.\n"
+            f"👀 Beobachten: {watch_str}"
+        )
 
 
 def _fire_trade(symbol: str, coin: str, entry: float, sl: float, tp: float,
@@ -693,10 +716,23 @@ def handle_callback_query(cq):
 
 
 def do_scan(triggered_by_command=False, show_loading=True, scan_label=""):
-    """EMA Sniper — 7 Filter (15m + 1H) → Chart + JA/NEIN Buttons → Trade bei Klick."""
+    """
+    Haupt-Scan-Funktion — entscheidet BTC 1H EMA20:
+      BTC bullish (über EMA20) → Plan A: 7 Krypto-Coins
+      BTC bearish (unter EMA20) → Plan B: US-Aktien
+    """
     if triggered_by_command and show_loading:
         send("🔍 Scanne Markt... bitte warten.")
 
+    # ── BTC 1H Entscheidung: Plan A oder Plan B ───────────────────────────────
+    btc_bullish, btc_emoji, btc_desc = get_btc_status()
+
+    if not btc_bullish:
+        # Plan B: US-Aktien — Krypto pausiert
+        scan_stocks(triggered_by_command=triggered_by_command, scan_label=scan_label)
+        return
+
+    # ── Plan A: Krypto ────────────────────────────────────────────────────────
     equity  = get_equity()
     setups, watch, _ = scan_all_symbols(SYMBOLS, equity=equity)
 
