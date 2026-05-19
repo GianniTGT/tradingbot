@@ -14,9 +14,9 @@ DEFAULT_CONFIG = {
     "ema_lens":    [20, 50, 100, 200],
     "atr_len":     14,
     "atr_mult":    1.5,
-    "swing_len":   5,
+    "swing_len":   7,       # Optimizer: 7 → PF 1.50 (war 5)
     "crv":         2.0,
-    "prox_pct":    0.5,
+    "prox_pct":    0.3,     # Optimizer: 0.3% → PF 1.50 (war 0.5%)
     "rsi_len":     14,
     "adx_len":     14,
     "adx_min":     25.0,
