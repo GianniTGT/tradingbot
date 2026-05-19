@@ -26,11 +26,9 @@ except Exception:
     BINANCE_KEY = BINANCE_SECRET = ""
 
 SYMBOLS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "LINKUSDT",
-    "NEARUSDT", "AVAXUSDT", "MAGICUSDT", "DOTUSDT", "ADAUSDT",
-    "XRPUSDT", "SUIUSDT", "INJUSDT", "APTUSDT", "ARBUSDT",
-    "MATICUSDT", "OPUSDT", "DOGEUSDT", "ATOMUSDT", "LTCUSDT",
-]
+    "ATOMUSDT", "LINKUSDT", "BNBUSDT", "DOTUSDT",
+    "SUIUSDT",  "INJUSDT",  "APTUSDT",
+]  # Top 7 — Optimizer: profitabelste Coins (PF > 1.0 über 6 Monate)
 
 # Live USDT-Balance von Binance holen (Fallback: 1000 USD)
 EQUITY = get_binance_usdt_balance(BINANCE_KEY, BINANCE_SECRET, fallback=1000.0)

@@ -47,10 +47,10 @@ if not TOKEN or not CHAT_ID:
 ALARMS_FILE = os.environ.get("ALARMS_FILE", os.path.join(os.path.dirname(__file__), "alarms.json"))
 INBOX_FILE  = os.environ.get("INBOX_FILE",  os.path.join(os.path.dirname(__file__), "alarm_inbox.json"))
 
-SYMBOLS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","LINKUSDT",
-           "NEARUSDT","AVAXUSDT","MAGICUSDT","DOTUSDT","ADAUSDT","XRPUSDT",
-           "SUIUSDT","INJUSDT","APTUSDT","ARBUSDT",
-           "MATICUSDT","OPUSDT","DOGEUSDT","ATOMUSDT","LTCUSDT"]
+SYMBOLS = [
+    "ATOMUSDT", "LINKUSDT", "BNBUSDT", "DOTUSDT",
+    "SUIUSDT",  "INJUSDT",  "APTUSDT",
+]  # Top 7 — Optimizer: profitabelste Coins (PF > 1.0 über 6 Monate)
 
 STOCK_SYMBOLS = ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL", "PG", "JNJ"]
 
