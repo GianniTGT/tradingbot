@@ -49,8 +49,8 @@ INBOX_FILE  = os.environ.get("INBOX_FILE",  os.path.join(os.path.dirname(__file_
 
 SYMBOLS = [
     "ATOMUSDT", "LINKUSDT", "BNBUSDT", "DOTUSDT",
-    "SUIUSDT",  "INJUSDT",  "APTUSDT",
-]  # Top 7 — Optimizer: profitabelste Coins (PF > 1.0 über 6 Monate)
+    "SUIUSDT",  "INJUSDT",  "APTUSDT", "ZECUSDT",
+]  # Top 8 — Optimizer-Liste + ZEC (starke EMA-Moves)
 
 STOCK_SYMBOLS = ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL", "PG", "JNJ"]
 
@@ -76,7 +76,10 @@ def get_equity():
             return bal
     return POSITION_SIZE if POSITION_SIZE else 1000.0
 CHAT_ID = str(CHAT_ID) if CHAT_ID else CHAT_ID
-COINGLASS_KEY = os.environ.get("COINGLASS_API_KEY", "")
+COINGLASS_KEY        = os.environ.get("COINGLASS_API_KEY", "")
+LIQ_WARN_THRESHOLD_M = float(os.environ.get("LIQ_WARN_THRESHOLD_M", "50"))  # Warn-Schwelle $50M
+TRADE_START_HOUR     = 10   # Trading-Verbot vor 10:30 CEST
+TRADE_START_MIN      = 30
 offset = 0
 
 # ── BTC Boss Filter ───────────────────────────────────────────────────────────
@@ -223,7 +226,7 @@ def cmd_status():
     btc_bullish, btc_emoji, btc_desc = get_btc_status()
     if btc_bullish:
         mode_line = f"🟢 <b>Plan A — Krypto aktiv</b>\n{btc_desc}"
-        coins_line = "📊 Coins: ATOM · LINK · BNB · DOT · SUI · INJ · APT"
+        coins_line = "📊 Coins: ATOM · LINK · BNB · DOT · SUI · INJ · APT · ZEC"
     else:
         mode_line = f"🔴 <b>Plan B — US-Aktien aktiv</b>\n{btc_desc}"
         coins_line = "📊 Aktien: AAPL · TSLA · NVDA · MSFT · GOOGL · PG · JNJ"
@@ -287,7 +290,7 @@ def cmd_hilfe():
         "  16:00 — Coin-Screener (Status vor heißer Phase)\n"
         "  16:45 — Post-NY Signal (nach NY-Eröffnungsvolatilität)\n"
         "  alle 20 Min — Stiller Hintergrund-Scan\n\n"
-        "📊 <b>Coins:</b> ATOM · LINK · BNB · DOT · SUI · INJ · APT\n\n"
+        "📊 <b>Coins:</b> ATOM · LINK · BNB · DOT · SUI · INJ · APT · ZEC\n\n"
         "/scan — Manueller EMA-Sniper-Scan (7/7 Filter)\n"
         "/briefing — Morgenbriefing manuell auslösen\n"
         "/price BNB — Aktueller Preis\n"
@@ -718,23 +721,140 @@ def handle_callback_query(cq):
 
 def do_scan(triggered_by_command=False, show_loading=True, scan_label=""):
     """
-    Haupt-Scan-Funktion — entscheidet BTC 1H EMA20:
-      BTC bullish (über EMA20) → Plan A: 7 Krypto-Coins
-      BTC bearish (unter EMA20) → Plan B: US-Aktien
+    Haupt-Scan mit institutioneller Liquiditäts-Logik:
+      1. Zeit-Filter  — kein Signal vor 10:30 CEST (Vorschau-Modus)
+      2. BTC 1H EMA20 — Plan A (Krypto) oder Plan B (Aktien)
+      3. Sweep-Check  — Untere Zone gesweept → PAUSE
+                        Obere Zone gesweept + Struktur hält → LONGs scharf
     """
+    now_cest_dt = datetime.utcnow() + CEST
+    hour_min    = now_cest_dt.hour * 60 + now_cest_dt.minute
+    too_early   = hour_min < TRADE_START_HOUR * 60 + TRADE_START_MIN
+
     if triggered_by_command and show_loading:
-        send("🔍 Scanne Markt... bitte warten.")
+        if too_early:
+            mins_left = (TRADE_START_HOUR * 60 + TRADE_START_MIN) - hour_min
+            send(
+                f"⏳ <b>Trading-Sperre bis 10:30 CEST</b> — noch {mins_left} Min.\n"
+                f"🔍 Vorschau-Scan läuft..."
+            )
+        else:
+            send("🔍 Scanne Markt... bitte warten.")
 
     # ── BTC 1H Entscheidung: Plan A oder Plan B ───────────────────────────────
     btc_bullish, btc_emoji, btc_desc = get_btc_status()
 
     if not btc_bullish:
-        # Plan B: US-Aktien — Krypto pausiert
+        # Plan B: US-Aktien — ebenfalls erst ab 10:30 scharf
+        if too_early:
+            if triggered_by_command:
+                send(
+                    f"⏳ <b>Plan B (US-Aktien) — Trading-Sperre bis 10:30</b>\n"
+                    f"{btc_desc}\nScan startet ab 10:30 CEST."
+                )
+            return
         scan_stocks(triggered_by_command=triggered_by_command, scan_label=scan_label)
         return
 
-    # ── Plan A: Krypto ────────────────────────────────────────────────────────
-    equity  = get_equity()
+    # ── Plan A: BTC bullish — dynamische Liq-Zonen + Sweep-Filter ───────────
+    liq_zones = fetch_dynamic_liq_zones()
+    sweep     = get_btc_sweep_status(liq_zones)
+    btc_p     = sweep["btc_price"]
+    if btc_p == 0:
+        try: btc_p = get_price("BTCUSDT")
+        except Exception: pass
+
+    upper_zone = liq_zones.get("upper_zone")
+    lower_zone = liq_zones.get("lower_zone")
+
+    # ── Obere Zone gesweept + Schwäche → VORSICHT, kein Long ─────────────────
+    if sweep["status"] == "upper_swept_weak":
+        if triggered_by_command:
+            zone_ref = f"~${upper_zone:,.0f}" if upper_zone else "Short-Liq Zone"
+            send(
+                f"⚠️ <b>BTC OBERE ZONE GESWEEPT + SCHWÄCHE</b>\n"
+                f"BTC ${round(btc_p, 0):,.0f} hat {zone_ref} (Short-Squeeze) berührt,\n"
+                f"danach bearische Struktur auf 15m\n\n"
+                f"⛔ <b>Kein LONG-Setup</b> — Drop-Risiko erhöht. Warte auf Stabilisierung."
+            )
+        return
+
+    # ── Vor 10:30 CEST: Vorschau-Modus (kein Alert, keine Buttons) ───────────
+    if too_early:
+        if triggered_by_command:
+            equity  = get_equity()
+            setups, watch, _ = scan_all_symbols(SYMBOLS, equity=equity)
+            now_str = now_cest()
+            hdr     = f"{scan_label}  |  " if scan_label else ""
+            zone_lines = []
+            if upper_zone:
+                d = f"{sweep['dist_upper_pct']:+.2f}%" if sweep["dist_upper_pct"] is not None else "?"
+                zone_lines.append(f"  ↑ Short-Liq: ~${upper_zone:,.0f} ({d})")
+            if lower_zone:
+                d = f"{sweep['dist_lower_pct']:+.2f}%" if sweep["dist_lower_pct"] is not None else "?"
+                zone_lines.append(f"  ↓ Long-Liq:  ~${lower_zone:,.0f} ({d})")
+            zone_note = ("🎯 BTC Liq-Zonen (live):\n" + "\n".join(zone_lines)) if zone_lines else ""
+            if setups:
+                coins_ready = ", ".join(s["coin"] for s in setups)
+                send(
+                    f"⏳ <b>VORSCHAU — {hdr}{now_str}</b>\n"
+                    f"<i>Signale erst ab 10:30 CEST</i>\n\n"
+                    f"🎯 Setup-Kandidaten: <b>{coins_ready}</b>\n\n"
+                    f"{zone_note}"
+                )
+            else:
+                watch_str = "  |  ".join(
+                    f"{w['coin']} ({w['dist_pct']:+.2f}%)" for w in watch
+                ) or "—"
+                send(
+                    f"⏳ <b>VORSCHAU — {hdr}{now_str}</b>\n"
+                    f"<i>Signale erst ab 10:30 CEST</i>\n\n"
+                    f"Kein Setup — kein Coin erfüllt alle 7 Filter.\n"
+                    f"👀 Beobachten: {watch_str}\n\n"
+                    f"{zone_note}"
+                )
+        return
+
+    # ── Lower Zone gesweept, aber noch keine bullische Bestätigung ────────────
+    if sweep["status"] == "lower_swept_neutral":
+        if triggered_by_command:
+            zone_ref = f"~${lower_zone:,.0f}" if lower_zone else "Long-Liq Zone"
+            send(
+                f"👀 <b>STOP-HUNT ERKANNT — warte auf Bestätigung</b>\n"
+                f"BTC ${round(btc_p, 0):,.0f} hat {zone_ref} (Long-Cluster) berührt\n\n"
+                f"Noch keine bullische 15m-Struktur — nächste Candle abwarten.\n"
+                f"⚡ Sobald 3/4 Candles bullisch: LONGs werden scharf gestellt."
+            )
+        return
+
+    # ── Keine Zone aktiv — warten ─────────────────────────────────────────────
+    if sweep["status"] == "neutral":
+        if triggered_by_command:
+            lines = []
+            if upper_zone:
+                d = f"{sweep['dist_upper_pct']:+.2f}%" if sweep["dist_upper_pct"] is not None else "?"
+                lines.append(f"  ↑ Short-Liq: ~${upper_zone:,.0f} ({d})")
+            if lower_zone:
+                d = f"{sweep['dist_lower_pct']:+.2f}%" if sweep["dist_lower_pct"] is not None else "?"
+                lines.append(f"  ↓ Long-Liq:  ~${lower_zone:,.0f} ({d})")
+            zone_info = "\n".join(lines) if lines else "  Keine Zonen erkannt — Coinglass Key prüfen."
+            send(
+                f"⏳ <b>WARTE AUF LIQUIDATIONS-SWEEP</b>\n"
+                f"BTC ${round(btc_p, 0):,.0f} — noch keine Zone aktiv\n\n"
+                f"🎯 Live Zonen:\n{zone_info}\n\n"
+                f"Strategie: LONGs nach Stop-Hunt (untere Zone) + bullischer 15m-Struktur."
+            )
+        return
+
+    # ── LONG-Setups FREIGEGEBEN ───────────────────────────────────────────────
+    # Fälle: lower_swept_bullish (PRIME LONG) oder upper_swept_neutral (Shorts geräumt, kein Drop)
+    if sweep["status"] == "lower_swept_bullish":
+        zone_ref  = f"~${lower_zone:,.0f}" if lower_zone else "Long-Liq Zone"
+        sweep_tag = f"🎯 STOP-HUNT ✅ {zone_ref}"
+    else:  # upper_swept_neutral
+        sweep_tag = "🔓 SHORTS GERÄUMT ✅"
+
+    equity    = get_equity()
     setups, watch, _ = scan_all_symbols(SYMBOLS, equity=equity)
 
     now    = now_cest()
@@ -751,9 +871,8 @@ def do_scan(triggered_by_command=False, show_loading=True, scan_label=""):
             htf_tag = "1H ✅" if s["htf_bull"] else "1H ⚠️"
 
             if AUTO_TRADE:
-                # Vollautomatisch (AUTO_TRADE=true in Railway) — sofort ausführen
                 caption = (
-                    f"🤖 <b>EMA SNIPER {s['coin']} 15m  |  {htf_tag}  |  {header}{now}</b>\n"
+                    f"🤖 <b>EMA SNIPER {s['coin']} 15m  |  {htf_tag}  |  {sweep_tag}  |  {header}{now}</b>\n"
                     f"Entry: ${s['entry']}  |  SL: ${s['sl']} (-{s['sl_pct']}%)"
                     f"  |  TP: ${s['tp']} (+{s['tp_pct']}%)\n"
                     f"RSI: {s['rsi']}  |  ADX: {s['adx']}  |  Filters: 7/7 ✅\n"
@@ -767,7 +886,6 @@ def do_scan(triggered_by_command=False, show_loading=True, scan_label=""):
                     daemon=True
                 ).start()
             else:
-                # Phase 1: Button-Bestätigung — JA = Trade, NEIN = Ablehnen
                 _pending_setups[s["symbol"]] = {
                     "coin":    s["coin"],
                     "entry":   s["entry"],
@@ -779,7 +897,7 @@ def do_scan(triggered_by_command=False, show_loading=True, scan_label=""):
                     "expires": time.time() + CONFIRM_WINDOW_SEC,
                 }
                 caption = (
-                    f"🎯 <b>EMA SNIPER {s['coin']} 15m  |  {htf_tag}  |  {header}{now}</b>\n"
+                    f"🎯 <b>EMA SNIPER {s['coin']} 15m  |  {htf_tag}  |  {sweep_tag}  |  {header}{now}</b>\n"
                     f"Entry: ${s['entry']}  |  SL: ${s['sl']} (-{s['sl_pct']}%)"
                     f"  |  TP: ${s['tp']} (+{s['tp_pct']}%)\n"
                     f"RSI: {s['rsi']}  |  ADX: {s['adx']}  |  Filters: 7/7 ✅\n"
@@ -789,11 +907,13 @@ def do_scan(triggered_by_command=False, show_loading=True, scan_label=""):
 
     elif triggered_by_command:
         watch_str = "  |  ".join(f"{w['coin']} ({w['dist_pct']:+.2f}%)" for w in watch)
-        msg = f"🎯 <b>EMA Sniper — {header}{now}</b>\nKein Setup — alle 7 Filter von keinem Coin erfüllt."
+        msg = (
+            f"🎯 <b>EMA Sniper  |  {sweep_tag}  |  {header}{now}</b>\n"
+            f"Kein Setup — alle 7 Filter von keinem Coin erfüllt."
+        )
         if watch_str:
             msg += f"\n👀 <b>Beobachten:</b> {watch_str}"
         send(msg)
-    # Kein Setup + Hintergrund-Scan → totale Stille
 
 # ── Morning Briefing (09:00 CEST) ────────────────────────────────────────────
 _briefing_done = set()  # dedup per day: {"2026-05-15"}
@@ -879,6 +999,188 @@ def generate_liquidation_chart():
         return None
 
 
+_liq_zones_cache: dict = {"data": None, "ts": 0.0}
+
+def fetch_dynamic_liq_zones():
+    """
+    Findet die stärksten BTC Liquidations-Zonen LIVE aus Coinglass — vollautomatisch.
+
+    Algorithmus (kein statischer Preis):
+      1. Coinglass: 4h Liquidationsvolumen der letzten 3 Tage (18 Buckets)
+      2. Binance:   passende 4h OHLCV-Candles für Preis-Zuordnung
+      3. Pro Bucket: Long-dominiert → Candle-LOW = Long-Liq-Zone (Cluster unten)
+                     Short-dominiert → Candle-HIGH = Short-Liq-Zone (Cluster oben)
+      4. Beste Zone je Typ nach höchstem Volumen → RAM-Variable (kein Env-Var!)
+      5. 15-Min-Cache verhindert redundante API-Calls im 20-Min-Hintergrund-Scan
+
+    Returns dict:
+      upper_zone / lower_zone : float | None  — dynamischer Preislevel
+      upper_vol_m / lower_vol_m: float        — Volumen in Mio. USD
+      warning_text             : str          — fertige Warn-Nachricht fürs Briefing
+    """
+    global _liq_zones_cache
+    if time.time() - _liq_zones_cache["ts"] < 900 and _liq_zones_cache["data"]:
+        return _liq_zones_cache["data"]
+
+    empty = {"upper_zone": None, "lower_zone": None,
+             "upper_vol_m": 0.0, "lower_vol_m": 0.0, "warning_text": ""}
+
+    if not COINGLASS_KEY:
+        return empty
+
+    try:
+        # 1. Coinglass: 4h-Buckets (letzte 3 Tage)
+        resp = _req.get(
+            "https://open-api.coinglass.com/public/v2/liquidation/chart",
+            headers={"coinglassSecret": COINGLASS_KEY},
+            params={"symbol": "BTC", "time_type": "h4", "limit": "18"},
+            timeout=10,
+        )
+        data = resp.json()
+        ok   = (data.get("code") == "0") or (data.get("success") is True)
+        rows = data.get("data") or []
+        if not ok or not rows:
+            return empty
+
+        # 2. Binance: 4h OHLCV für Preis-Zuordnung
+        url = "https://api.binance.com/api/v3/klines?" + urlencode(
+            {"symbol": "BTCUSDT", "interval": "4h", "limit": 18})
+        with urlopen(url, timeout=8) as r:
+            candles = json.loads(r.read())
+        candle_map = {int(k[0]): {"high": float(k[2]), "low": float(k[3])} for k in candles}
+
+        # 3. Enrichment: Liq-Volumen + Preis zusammenführen
+        upper_candidates, lower_candidates = [], []
+        for row in rows:
+            ts        = int(row.get("time", row.get("t", 0)))
+            ts_ms     = ts * 1000 if ts < 1e12 else ts
+            long_vol  = float(row.get("longLiquidationUsd",  row.get("long",  0))) / 1e6
+            short_vol = float(row.get("shortLiquidationUsd", row.get("short", 0))) / 1e6
+            total_vol = long_vol + short_vol
+            if total_vol < LIQ_WARN_THRESHOLD_M:
+                continue
+            # Nächste 4h-Candle suchen (Toleranz ±4h)
+            best = min(candle_map.keys(), key=lambda t: abs(t - ts_ms), default=None)
+            if not best or abs(best - ts_ms) > 4 * 3600 * 1000:
+                continue
+            c = candle_map[best]
+            if long_vol >= short_vol:
+                lower_candidates.append({"price": c["low"],  "long_vol": long_vol,
+                                          "short_vol": short_vol, "total_vol": total_vol})
+            else:
+                upper_candidates.append({"price": c["high"], "long_vol": long_vol,
+                                          "short_vol": short_vol, "total_vol": total_vol})
+
+        # 4. Stärksten Kandidaten je Zone wählen
+        upper = max(upper_candidates, key=lambda x: x["total_vol"]) if upper_candidates else None
+        lower = max(lower_candidates, key=lambda x: x["total_vol"]) if lower_candidates else None
+
+        # 5. Warn-Text + Zonenübersicht
+        warnings = []
+        if upper:
+            warnings.append(
+                f"⚠️ <b>SHORT-LIQ ZONE:</b> ~${upper['price']:,.0f} — "
+                f"${upper['short_vol']:.1f}M Shorts geclustert (Short-Squeeze Risiko!)"
+            )
+        if lower:
+            warnings.append(
+                f"⚠️ <b>LONG-LIQ ZONE:</b> ~${lower['price']:,.0f} — "
+                f"${lower['long_vol']:.1f}M Longs geclustert (Stop-Hunt Magnet!)"
+            )
+        try:
+            btc_now    = get_price("BTCUSDT")
+            zone_lines = []
+            if upper:
+                d = round((upper["price"] - btc_now) / btc_now * 100, 2)
+                zone_lines.append(f"  ↑ Short-Liq: ~${upper['price']:,.0f} ({d:+.2f}%) — ${upper['short_vol']:.1f}M")
+            if lower:
+                d = round((lower["price"] - btc_now) / btc_now * 100, 2)
+                zone_lines.append(f"  ↓ Long-Liq:  ~${lower['price']:,.0f} ({d:+.2f}%) — ${lower['long_vol']:.1f}M")
+            if zone_lines:
+                warnings.append("🎯 <b>Dynamische BTC Liq-Zonen:</b>\n" + "\n".join(zone_lines))
+        except Exception:
+            pass
+
+        result = {
+            "upper_zone":  upper["price"]     if upper else None,
+            "lower_zone":  lower["price"]     if lower else None,
+            "upper_vol_m": upper["total_vol"] if upper else 0.0,
+            "lower_vol_m": lower["total_vol"] if lower else 0.0,
+            "warning_text": ("\n".join(warnings) + "\n") if warnings else "",
+        }
+        _liq_zones_cache = {"data": result, "ts": time.time()}
+        return result
+
+    except Exception as e:
+        print(f"[DynZone] error: {e}", flush=True)
+        return empty
+
+
+def get_btc_sweep_status(liq_zones):
+    """
+    Prüft BTC 15m-Candles (letzte 8h) auf Sweep der dynamischen Liq-Zonen.
+
+    KORREKTE Marktpsychologie:
+      lower_swept_bullish → Stop-Hunt auf Long-Cluster, dann Erholung
+                            = PRIME LONG SETUP (Liquidität abgeholt + Käufer zurück!)
+      lower_swept_neutral → Sweep, aber noch keine bullische Bestätigung
+                            = Warten auf Kerzen-Bestätigung
+      upper_swept_weak    → Short-Squeeze, danach Schwäche / Rejection
+                            = VORSICHT — potenzieller Drop, kein Long
+      upper_swept_neutral → Shorts geräumt, kein klares Drop-Signal
+                            = Normal weiter scannen
+      neutral             → keine Zone aktiv, warten
+    """
+    upper_zone = liq_zones.get("upper_zone")
+    lower_zone = liq_zones.get("lower_zone")
+
+    try:
+        url = "https://api.binance.com/api/v3/klines?" + urlencode(
+            {"symbol": "BTCUSDT", "interval": "15m", "limit": 32})
+        with urlopen(url, timeout=8) as r:
+            candles = json.loads(r.read())
+        highs  = [float(k[2]) for k in candles]
+        lows   = [float(k[3]) for k in candles]
+        opens  = [float(k[1]) for k in candles]
+        closes = [float(k[4]) for k in candles]
+        last_close = closes[-1]
+
+        # Struktur-Check auf den letzten 4 Candles (≈ 1 Stunde)
+        rc = closes[-4:]; ro = opens[-4:]
+        bullish_count = sum(1 for c, o in zip(rc, ro) if c > o)
+        bearish_count = sum(1 for c, o in zip(rc, ro) if c < o)
+        is_bullish = bullish_count >= 3 and last_close > closes[-5]
+        is_weak    = bearish_count >= 3 and last_close < closes[-5]
+
+        lower_touched = lower_zone and any(lo <= lower_zone for lo in lows)
+        upper_touched = upper_zone and any(h  >= upper_zone for h  in highs)
+
+        dist_upper = round((upper_zone - last_close) / last_close * 100, 2) if upper_zone else None
+        dist_lower = round((last_close - lower_zone) / last_close * 100, 2) if lower_zone else None
+
+        if lower_touched and is_bullish:
+            status = "lower_swept_bullish"
+        elif lower_touched:
+            status = "lower_swept_neutral"
+        elif upper_touched and is_weak:
+            status = "upper_swept_weak"
+        elif upper_touched:
+            status = "upper_swept_neutral"
+        else:
+            status = "neutral"
+
+        return {
+            "status":         status,
+            "btc_price":      last_close,
+            "dist_upper_pct": dist_upper,
+            "dist_lower_pct": dist_lower,
+        }
+    except Exception as e:
+        print(f"[Sweep] error: {e}", flush=True)
+        return {"status": "neutral", "btc_price": 0.0,
+                "dist_upper_pct": None, "dist_lower_pct": None}
+
+
 def fetch_news_today():
     """Merr lajmet High-Impact USD nga ForexFactory për sot (CEST)."""
     try:
@@ -918,11 +1220,12 @@ def morning_briefing(force=False):
 
     sentiment_text = fetch_market_sentiment()
     news_text      = fetch_news_today()
+    liq_zones      = fetch_dynamic_liq_zones()  # dynamische Zonen live aus Coinglass
 
-    # Bubble 1: briefing i pastër pa "Duke skanuar..."
     text_part = (
-        f"☀️ <b>BRIEFING MËNGJESI — {day}  09:00 CEST</b>\n{'─'*28}\n\n"
+        f"☀️ <b>MORGENBRIEFING — {day}  09:00 CEST</b>\n{'─'*28}\n\n"
         f"{sentiment_text}\n"
+        f"{liq_zones['warning_text']}"
         f"{news_text}"
     )
 
@@ -932,7 +1235,7 @@ def morning_briefing(force=False):
     else:
         send(text_part)
 
-    # Bubble 2: rezultati i skanimit (setup chart OSE status — 1 bubble, pa "Duke skanuar...")
+    # Vorschau-Scan (09:00 → vor 10:30, kein echtes Signal — nur Kandidaten + Zonen)
     do_scan(triggered_by_command=True, show_loading=False)
 
 
