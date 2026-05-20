@@ -226,7 +226,7 @@ def cmd_status():
     btc_bullish, btc_emoji, btc_desc = get_btc_status()
     if btc_bullish:
         mode_line = f"🟢 <b>Plan A — Krypto aktiv</b>\n{btc_desc}"
-        coins_line = "📊 Coins: ATOM · LINK · BNB · DOT · SUI · INJ · APT"
+        coins_line = "📊 Coins: ATOM · LINK · BNB · DOT · SUI · INJ · APT · ZEC"
     else:
         mode_line = f"🔴 <b>Plan B — US-Aktien aktiv</b>\n{btc_desc}"
         coins_line = "📊 Aktien: AAPL · TSLA · NVDA · MSFT · GOOGL · PG · JNJ"
@@ -290,7 +290,7 @@ def cmd_hilfe():
         "  16:00 — Coin-Screener (Status vor heißer Phase)\n"
         "  16:45 — Post-NY Signal (nach NY-Eröffnungsvolatilität)\n"
         "  alle 20 Min — Stiller Hintergrund-Scan\n\n"
-        "📊 <b>Coins:</b> ATOM · LINK · BNB · DOT · SUI · INJ · APT\n\n"
+        "📊 <b>Coins:</b> ATOM · LINK · BNB · DOT · SUI · INJ · APT · ZEC\n\n"
         "/scan — Manueller EMA-Sniper-Scan (7/7 Filter)\n"
         "/briefing — Morgenbriefing manuell auslösen\n"
         "/price BNB — Aktueller Preis\n"
