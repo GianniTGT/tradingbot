@@ -15,7 +15,7 @@ import itertools
 from datetime import datetime, timedelta
 
 # ── Nur die profitablen 7 Coins ────────────────────────────────────────────────
-SYMBOLS = ["ATOMUSDT", "LINKUSDT", "BNBUSDT", "DOTUSDT", "SUIUSDT", "INJUSDT", "APTUSDT"]
+SYMBOLS = ["ATOMUSDT", "LINKUSDT", "BNBUSDT", "DOTUSDT", "SUIUSDT", "INJUSDT", "APTUSDT", "ZECUSDT"]
 
 MONTHS   = 6
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "data_cache")
