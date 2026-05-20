@@ -76,7 +76,12 @@ def get_equity():
             return bal
     return POSITION_SIZE if POSITION_SIZE else 1000.0
 CHAT_ID = str(CHAT_ID) if CHAT_ID else CHAT_ID
-COINGLASS_KEY = os.environ.get("COINGLASS_API_KEY", "")
+COINGLASS_KEY        = os.environ.get("COINGLASS_API_KEY", "")
+UPPER_LIQ_ZONE       = float(os.environ.get("UPPER_LIQ_ZONE",       "78500"))  # obere BTC Liq-Zone
+LOWER_LIQ_ZONE       = float(os.environ.get("LOWER_LIQ_ZONE",       "75500"))  # untere BTC Liq-Zone
+LIQ_WARN_THRESHOLD_M = float(os.environ.get("LIQ_WARN_THRESHOLD_M", "50"))     # Warnschwelle $50M
+TRADE_START_HOUR     = 10   # Trading-Verbot vor 10:30 CEST
+TRADE_START_MIN      = 30
 offset = 0
 
 # ── BTC Boss Filter ───────────────────────────────────────────────────────────
@@ -718,24 +723,109 @@ def handle_callback_query(cq):
 
 def do_scan(triggered_by_command=False, show_loading=True, scan_label=""):
     """
-    Haupt-Scan-Funktion — entscheidet BTC 1H EMA20:
-      BTC bullish (über EMA20) → Plan A: 7 Krypto-Coins
-      BTC bearish (unter EMA20) → Plan B: US-Aktien
+    Haupt-Scan mit institutioneller Liquiditäts-Logik:
+      1. Zeit-Filter  — kein Signal vor 10:30 CEST (Vorschau-Modus)
+      2. BTC 1H EMA20 — Plan A (Krypto) oder Plan B (Aktien)
+      3. Sweep-Check  — Untere Zone gesweept → PAUSE
+                        Obere Zone gesweept + Struktur hält → LONGs scharf
     """
+    now_cest_dt = datetime.utcnow() + CEST
+    hour_min    = now_cest_dt.hour * 60 + now_cest_dt.minute
+    too_early   = hour_min < TRADE_START_HOUR * 60 + TRADE_START_MIN
+
     if triggered_by_command and show_loading:
-        send("🔍 Scanne Markt... bitte warten.")
+        if too_early:
+            mins_left = (TRADE_START_HOUR * 60 + TRADE_START_MIN) - hour_min
+            send(
+                f"⏳ <b>Trading-Sperre bis 10:30 CEST</b> — noch {mins_left} Min.\n"
+                f"🔍 Vorschau-Scan läuft..."
+            )
+        else:
+            send("🔍 Scanne Markt... bitte warten.")
 
     # ── BTC 1H Entscheidung: Plan A oder Plan B ───────────────────────────────
     btc_bullish, btc_emoji, btc_desc = get_btc_status()
 
     if not btc_bullish:
-        # Plan B: US-Aktien — Krypto pausiert
+        # Plan B: US-Aktien — ebenfalls erst ab 10:30 scharf
+        if too_early:
+            if triggered_by_command:
+                send(
+                    f"⏳ <b>Plan B (US-Aktien) — Trading-Sperre bis 10:30</b>\n"
+                    f"{btc_desc}\nScan startet ab 10:30 CEST."
+                )
+            return
         scan_stocks(triggered_by_command=triggered_by_command, scan_label=scan_label)
         return
 
-    # ── Plan A: Krypto ────────────────────────────────────────────────────────
-    equity  = get_equity()
+    # ── Plan A: BTC bullish — Sweep-Filter ───────────────────────────────────
+    sweep = get_btc_sweep_status()
+    btc_p = sweep["btc_price"]
+    if btc_p == 0:
+        try: btc_p = get_price("BTCUSDT")
+        except Exception: pass
+
+    # ── Untere Zone gesweept → Krypto-Scan KOMPLETT PAUSIERT ─────────────────
+    if sweep["status"] == "lower_swept":
+        if triggered_by_command:
+            send(
+                f"🔴 <b>BTC UNTERE ZONE GESWEEPT — SCAN PAUSIERT</b>\n"
+                f"BTC ${round(btc_p, 0):,.0f} hat Liq-Zone ${LOWER_LIQ_ZONE:,.0f} berührt\n\n"
+                f"⛔ <b>Kein LONG-Setup</b> — Markt zeigt zu viel Schwäche.\n"
+                f"👀 Warte auf Stabilisierung oder prüfe Short-Szenarien."
+            )
+        return
+
+    # ── Vor 10:30 CEST: Vorschau-Modus (scan, aber KEINE Buttons/Signale) ────
+    if too_early:
+        if triggered_by_command:
+            equity  = get_equity()
+            setups, watch, _ = scan_all_symbols(SYMBOLS, equity=equity)
+            now_str = now_cest()
+            hdr     = f"{scan_label}  |  " if scan_label else ""
+            zone_note = (
+                f"🎯 BTC Zonen:\n"
+                f"  ↑ Obere: ${UPPER_LIQ_ZONE:,.0f} ({sweep['dist_upper_pct']:+.2f}%)\n"
+                f"  ↓ Untere: ${LOWER_LIQ_ZONE:,.0f} ({sweep['dist_lower_pct']:+.2f}%)"
+            )
+            if setups:
+                coins_ready = ", ".join(s["coin"] for s in setups)
+                send(
+                    f"⏳ <b>VORSCHAU — {hdr}{now_str}</b>\n"
+                    f"<i>Signale erst ab 10:30 CEST</i>\n\n"
+                    f"🎯 Setup-Kandidaten: <b>{coins_ready}</b>\n\n"
+                    f"{zone_note}"
+                )
+            else:
+                watch_str = "  |  ".join(
+                    f"{w['coin']} ({w['dist_pct']:+.2f}%)" for w in watch
+                ) or "—"
+                send(
+                    f"⏳ <b>VORSCHAU — {hdr}{now_str}</b>\n"
+                    f"<i>Signale erst ab 10:30 CEST</i>\n\n"
+                    f"Kein Setup — kein Coin erfüllt alle 7 Filter.\n"
+                    f"👀 Beobachten: {watch_str}\n\n"
+                    f"{zone_note}"
+                )
+        return
+
+    # ── Obere Zone noch NICHT gesweept → warte auf Sweep-Bestätigung ─────────
+    if sweep["status"] != "upper_swept":
+        if triggered_by_command:
+            send(
+                f"⏳ <b>WARTE AUF BTC SWEEP DER OBEREN ZONE</b>\n"
+                f"BTC ${round(btc_p, 0):,.0f} — keine Zone aktiv\n\n"
+                f"↑ Obere Liq-Zone: ${UPPER_LIQ_ZONE:,.0f} "
+                f"(noch {sweep['dist_upper_pct']:+.2f}% entfernt)\n\n"
+                f"LONGs werden erst nach Sweep der oberen Zone + Strukturbestätigung scharf gestellt."
+            )
+        return
+
+    # ── Plan A: LONG-Setups FREIGEGEBEN ──────────────────────────────────────
+    # (nach 10:30 CEST + obere Zone gesweept + Struktur hält)
+    equity    = get_equity()
     setups, watch, _ = scan_all_symbols(SYMBOLS, equity=equity)
+    sweep_tag = "🔓 SWEEP ✅"
 
     now    = now_cest()
     header = f"{scan_label}  |  " if scan_label else ""
@@ -751,9 +841,8 @@ def do_scan(triggered_by_command=False, show_loading=True, scan_label=""):
             htf_tag = "1H ✅" if s["htf_bull"] else "1H ⚠️"
 
             if AUTO_TRADE:
-                # Vollautomatisch (AUTO_TRADE=true in Railway) — sofort ausführen
                 caption = (
-                    f"🤖 <b>EMA SNIPER {s['coin']} 15m  |  {htf_tag}  |  {header}{now}</b>\n"
+                    f"🤖 <b>EMA SNIPER {s['coin']} 15m  |  {htf_tag}  |  {sweep_tag}  |  {header}{now}</b>\n"
                     f"Entry: ${s['entry']}  |  SL: ${s['sl']} (-{s['sl_pct']}%)"
                     f"  |  TP: ${s['tp']} (+{s['tp_pct']}%)\n"
                     f"RSI: {s['rsi']}  |  ADX: {s['adx']}  |  Filters: 7/7 ✅\n"
@@ -767,7 +856,6 @@ def do_scan(triggered_by_command=False, show_loading=True, scan_label=""):
                     daemon=True
                 ).start()
             else:
-                # Phase 1: Button-Bestätigung — JA = Trade, NEIN = Ablehnen
                 _pending_setups[s["symbol"]] = {
                     "coin":    s["coin"],
                     "entry":   s["entry"],
@@ -779,7 +867,7 @@ def do_scan(triggered_by_command=False, show_loading=True, scan_label=""):
                     "expires": time.time() + CONFIRM_WINDOW_SEC,
                 }
                 caption = (
-                    f"🎯 <b>EMA SNIPER {s['coin']} 15m  |  {htf_tag}  |  {header}{now}</b>\n"
+                    f"🎯 <b>EMA SNIPER {s['coin']} 15m  |  {htf_tag}  |  {sweep_tag}  |  {header}{now}</b>\n"
                     f"Entry: ${s['entry']}  |  SL: ${s['sl']} (-{s['sl_pct']}%)"
                     f"  |  TP: ${s['tp']} (+{s['tp_pct']}%)\n"
                     f"RSI: {s['rsi']}  |  ADX: {s['adx']}  |  Filters: 7/7 ✅\n"
@@ -789,11 +877,13 @@ def do_scan(triggered_by_command=False, show_loading=True, scan_label=""):
 
     elif triggered_by_command:
         watch_str = "  |  ".join(f"{w['coin']} ({w['dist_pct']:+.2f}%)" for w in watch)
-        msg = f"🎯 <b>EMA Sniper — {header}{now}</b>\nKein Setup — alle 7 Filter von keinem Coin erfüllt."
+        msg = (
+            f"🎯 <b>EMA Sniper  |  {sweep_tag}  |  {header}{now}</b>\n"
+            f"Kein Setup — alle 7 Filter von keinem Coin erfüllt."
+        )
         if watch_str:
             msg += f"\n👀 <b>Beobachten:</b> {watch_str}"
         send(msg)
-    # Kein Setup + Hintergrund-Scan → totale Stille
 
 # ── Morning Briefing (09:00 CEST) ────────────────────────────────────────────
 _briefing_done = set()  # dedup per day: {"2026-05-15"}
@@ -879,6 +969,110 @@ def generate_liquidation_chart():
         return None
 
 
+def fetch_btc_liq_zone_warning():
+    """
+    Aggregiert BTC Liquidations-Volumen (24h) aus Coinglass.
+    Gibt Warn-Text zurück wenn eine Zone > $50M aufweist.
+    Immer: zeigt BTC-Abstand zu oberer/unterer Liq-Zone.
+    """
+    if not COINGLASS_KEY:
+        return ""
+    try:
+        resp = _req.get(
+            "https://open-api.coinglass.com/public/v2/liquidation/chart",
+            headers={"coinglassSecret": COINGLASS_KEY},
+            params={"symbol": "BTC", "time_type": "h4", "limit": "6"},
+            timeout=10,
+        )
+        data = resp.json()
+        ok   = (data.get("code") == "0") or (data.get("success") is True)
+        rows = data.get("data") or []
+        if not ok or not rows:
+            return ""
+
+        total_long  = sum(float(r.get("longLiquidationUsd",  r.get("long",  0))) for r in rows) / 1e6
+        total_short = sum(float(r.get("shortLiquidationUsd", r.get("short", 0))) for r in rows) / 1e6
+        warnings    = []
+
+        if total_long >= LIQ_WARN_THRESHOLD_M:
+            warnings.append(
+                f"⚠️ <b>LONG-LIQ WARNUNG:</b> ${total_long:.1f}M Longs liquidiert (24h)\n"
+                f"   Obere Zone ~${UPPER_LIQ_ZONE:,.0f} — erhebliches Sweep-Risiko!"
+            )
+        if total_short >= LIQ_WARN_THRESHOLD_M:
+            warnings.append(
+                f"⚠️ <b>SHORT-LIQ WARNUNG:</b> ${total_short:.1f}M Shorts liquidiert (24h)\n"
+                f"   Untere Zone ~${LOWER_LIQ_ZONE:,.0f} — starker Liquiditätsmagnet!"
+            )
+
+        try:
+            btc_price  = get_price("BTCUSDT")
+            dist_upper = round((UPPER_LIQ_ZONE - btc_price) / btc_price * 100, 2)
+            dist_lower = round((btc_price - LOWER_LIQ_ZONE) / btc_price * 100, 2)
+            zone_line  = (
+                f"🎯 <b>BTC Liquiditätszonen:</b>\n"
+                f"  ↑ Obere: ${UPPER_LIQ_ZONE:,.0f} ({dist_upper:+.2f}%) — Longs ${total_long:.1f}M\n"
+                f"  ↓ Untere: ${LOWER_LIQ_ZONE:,.0f} ({dist_lower:+.2f}%) — Shorts ${total_short:.1f}M"
+            )
+        except Exception:
+            zone_line = ""
+
+        result = ("\n".join(warnings) + "\n") if warnings else ""
+        if zone_line:
+            result += zone_line + "\n"
+        return result
+
+    except Exception as e:
+        print(f"[LiqZone] error: {e}", flush=True)
+        return ""
+
+
+def get_btc_sweep_status():
+    """
+    Prüft BTC 15m-Candles (letzte 8h) auf Sweep der Liquidationszonen.
+    Returns dict:
+      status: "upper_swept" | "lower_swept" | "neutral"
+      btc_price, dist_upper_pct, dist_lower_pct
+    Logik:
+      upper_swept → Preis hat UPPER_LIQ_ZONE erreicht UND hält sich knapp darunter/darüber
+      lower_swept → Preis hat LOWER_LIQ_ZONE berührt/unterschritten (Schwäche)
+    """
+    try:
+        url = "https://api.binance.com/api/v3/klines?" + urlencode(
+            {"symbol": "BTCUSDT", "interval": "15m", "limit": 32})
+        with urlopen(url, timeout=8) as r:
+            candles = json.loads(r.read())
+        highs      = [float(k[2]) for k in candles]
+        lows       = [float(k[3]) for k in candles]
+        closes     = [float(k[4]) for k in candles]
+        last_close = closes[-1]
+
+        upper_touched   = any(h >= UPPER_LIQ_ZONE for h in highs)
+        structure_holds = last_close >= UPPER_LIQ_ZONE * 0.997  # max 0.3% unter Zone
+        lower_swept     = any(lo <= LOWER_LIQ_ZONE for lo in lows)
+
+        dist_upper = round((UPPER_LIQ_ZONE - last_close) / last_close * 100, 2)
+        dist_lower = round((last_close - LOWER_LIQ_ZONE) / last_close * 100, 2)
+
+        if lower_swept:
+            status = "lower_swept"
+        elif upper_touched and structure_holds:
+            status = "upper_swept"
+        else:
+            status = "neutral"
+
+        return {
+            "status":         status,
+            "btc_price":      last_close,
+            "dist_upper_pct": dist_upper,
+            "dist_lower_pct": dist_lower,
+        }
+    except Exception as e:
+        print(f"[Sweep] error: {e}", flush=True)
+        return {"status": "neutral", "btc_price": 0.0,
+                "dist_upper_pct": 0.0, "dist_lower_pct": 0.0}
+
+
 def fetch_news_today():
     """Merr lajmet High-Impact USD nga ForexFactory për sot (CEST)."""
     try:
@@ -918,11 +1112,12 @@ def morning_briefing(force=False):
 
     sentiment_text = fetch_market_sentiment()
     news_text      = fetch_news_today()
+    liq_warning    = fetch_btc_liq_zone_warning()  # Zonen-Warnung >$50M
 
-    # Bubble 1: briefing i pastër pa "Duke skanuar..."
     text_part = (
-        f"☀️ <b>BRIEFING MËNGJESI — {day}  09:00 CEST</b>\n{'─'*28}\n\n"
+        f"☀️ <b>MORGENBRIEFING — {day}  09:00 CEST</b>\n{'─'*28}\n\n"
         f"{sentiment_text}\n"
+        f"{liq_warning}"
         f"{news_text}"
     )
 
@@ -932,7 +1127,7 @@ def morning_briefing(force=False):
     else:
         send(text_part)
 
-    # Bubble 2: rezultati i skanimit (setup chart OSE status — 1 bubble, pa "Duke skanuar...")
+    # Vorschau-Scan (09:00 → vor 10:30, kein echtes Signal — nur Kandidaten + Zonen)
     do_scan(triggered_by_command=True, show_loading=False)
 
 
