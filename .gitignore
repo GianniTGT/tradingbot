@@ -4,6 +4,9 @@ binance_config.json
 alarms.json
 alarm_inbox.json
 
+# Optimizer Cache (Binance-Daten, lokal generiert)
+data_cache/
+
 # Logs & Temp
 *.log
 _*.py
