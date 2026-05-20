@@ -49,8 +49,8 @@ INBOX_FILE  = os.environ.get("INBOX_FILE",  os.path.join(os.path.dirname(__file_
 
 SYMBOLS = [
     "ATOMUSDT", "LINKUSDT", "BNBUSDT", "DOTUSDT",
-    "SUIUSDT",  "INJUSDT",  "APTUSDT",
-]  # Top 7 — Optimizer: profitabelste Coins (PF > 1.0 über 6 Monate)
+    "SUIUSDT",  "INJUSDT",  "APTUSDT", "ZECUSDT",
+]  # Top 8 — Optimizer-Liste + ZEC (starke EMA-Moves)
 
 STOCK_SYMBOLS = ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL", "PG", "JNJ"]
 
