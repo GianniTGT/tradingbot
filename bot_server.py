@@ -293,6 +293,7 @@ def cmd_hilfe():
         "📊 <b>Coins:</b> ATOM · LINK · BNB · DOT · SUI · INJ · APT · ZEC\n\n"
         "/scan — Manueller EMA-Sniper-Scan (7/7 Filter)\n"
         "/briefing — Morgenbriefing manuell auslösen\n"
+        "/zonen — Live BTC Liquidations-Zonen + Sweep-Status\n"
         "/price BNB — Aktueller Preis\n"
         "/status — Bot-Status\n\n"
         "/alarm BNB 674.50 663.20 685 — Preisalarm setzen\n"
