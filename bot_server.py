@@ -323,8 +323,8 @@ def cmd_zonen():
             "⚠️ <b>Keine Zonen berechnet</b>\n\n"
             "Mögliche Ursachen:\n"
             "• Kein Coinglass API Key gesetzt\n"
-            "• Kein Bucket hatte Volumen > $50M in den letzten 3 Tagen\n"
-            "• API-Fehler (Logs in Railway prüfen)"
+            "• Coinglass API antwortet nicht wie erwartet\n"
+            "• Logs in Railway prüfen: [DynZone] Zeile"
         )
         return
 
@@ -1092,6 +1092,8 @@ def fetch_dynamic_liq_zones():
         data = resp.json()
         ok   = (data.get("code") == "0") or (data.get("success") is True)
         rows = data.get("data") or []
+        print(f"[DynZone] status={resp.status_code} code={data.get('code')} "
+              f"success={data.get('success')} rows={len(rows)} raw={resp.text[:300]}", flush=True)
         if not ok or not rows:
             return empty
 
