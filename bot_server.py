@@ -1109,7 +1109,7 @@ def fetch_dynamic_liq_zones():
             long_vol  = float(row.get("longLiquidationUsd",  row.get("long",  0))) / 1e6
             short_vol = float(row.get("shortLiquidationUsd", row.get("short", 0))) / 1e6
             total_vol = long_vol + short_vol
-            if total_vol < LIQ_WARN_THRESHOLD_M:
+            if total_vol == 0:
                 continue
             # Nächste 4h-Candle suchen (Toleranz ±4h)
             best = min(candle_map.keys(), key=lambda t: abs(t - ts_ms), default=None)
