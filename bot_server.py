@@ -307,6 +307,58 @@ def cmd_hilfe():
         "  [NEIN, ABLEHNEN ❌] → Setup verworfen</i>"
     )
 
+def cmd_zonen():
+    """Zeigt die aktuell berechneten BTC Liquidations-Zonen aus Coinglass."""
+    send("🔍 Berechne BTC Liq-Zonen aus Coinglass...")
+    _liq_zones_cache["ts"] = 0  # Cache leeren → frische Daten erzwingen
+    zones = fetch_dynamic_liq_zones()
+    try:
+        btc_p = get_price("BTCUSDT")
+    except Exception:
+        btc_p = 0
+
+    if not zones["upper_zone"] and not zones["lower_zone"]:
+        send(
+            "⚠️ <b>Keine Zonen berechnet</b>\n\n"
+            "Mögliche Ursachen:\n"
+            "• Kein Coinglass API Key gesetzt\n"
+            "• Kein Bucket hatte Volumen > $50M in den letzten 3 Tagen\n"
+            "• API-Fehler (Logs in Railway prüfen)"
+        )
+        return
+
+    lines = [f"🎯 <b>BTC Liq-Zonen — Live aus Coinglass</b>\n"
+             f"BTC aktuell: ${round(btc_p, 0):,.0f}\n{'─'*28}"]
+
+    if zones["upper_zone"]:
+        dist = round((zones["upper_zone"] - btc_p) / btc_p * 100, 2) if btc_p else 0
+        lines.append(
+            f"\n↑ <b>Short-Liq Zone (obere):</b>\n"
+            f"   Preis: ~${zones['upper_zone']:,.0f}  ({dist:+.2f}%)\n"
+            f"   Volumen: ${zones['upper_vol_m']:.1f}M\n"
+            f"   → Shorts clustern hier — Short-Squeeze Magnet"
+        )
+    if zones["lower_zone"]:
+        dist = round((zones["lower_zone"] - btc_p) / btc_p * 100, 2) if btc_p else 0
+        lines.append(
+            f"\n↓ <b>Long-Liq Zone (untere):</b>\n"
+            f"   Preis: ~${zones['lower_zone']:,.0f}  ({dist:+.2f}%)\n"
+            f"   Volumen: ${zones['lower_vol_m']:.1f}M\n"
+            f"   → Longs clustern hier — Stop-Hunt Magnet"
+        )
+
+    sweep = get_btc_sweep_status(zones)
+    status_map = {
+        "lower_swept_bullish": "🎯 STOP-HUNT + bullische Struktur → LONGs aktiv!",
+        "lower_swept_neutral": "👀 Untere Zone berührt — warte auf Bestätigung",
+        "upper_swept_weak":    "⚠️ Short-Squeeze + Schwäche → kein Long",
+        "upper_swept_neutral": "🔓 Shorts geräumt — kein Drop-Signal",
+        "neutral":             "⏳ Keine Zone aktiv — warte auf Sweep",
+    }
+    lines.append(f"\n<b>Sweep-Status:</b> {status_map.get(sweep['status'], sweep['status'])}")
+    send("\n".join(lines))
+
+
 def cmd_price(parts):
     if len(parts) < 2:
         send("Përdorimi: /price BNB"); return
@@ -1362,6 +1414,7 @@ def main():
 
                 if cmd == "/hilfe":          cmd_hilfe()
                 elif cmd == "/status":       cmd_status()
+                elif cmd == "/zonen":        threading.Thread(target=cmd_zonen, daemon=True).start()
                 elif cmd == "/scan":         threading.Thread(target=do_scan, args=(True,), daemon=True).start()
                 elif cmd == "/briefing":     cmd_briefing()
                 elif cmd == "/price":        cmd_price(parts)
