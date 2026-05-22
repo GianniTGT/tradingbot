@@ -1275,7 +1275,7 @@ def morning_briefing(force=False):
     liq_zones      = fetch_dynamic_liq_zones()  # dynamische Zonen live aus Coinglass
 
     text_part = (
-        f"☀️ <b>MORGENBRIEFING — {day}  09:00 CEST</b>\n{'─'*28}\n\n"
+        f"☀️ <b>MORGENBRIEFING — {day}  09:00 CEST</b>\n\n"
         f"{sentiment_text}\n"
         f"{liq_zones['warning_text']}"
         f"{news_text}"
