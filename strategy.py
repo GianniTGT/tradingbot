@@ -8,10 +8,12 @@ Inspiriert von: Kristjan Qullamaggie, Mark Minervini, Pradeep Bonde
 Filter-Kaskade:
   F1 — Daily Golden Cross:   EMA50 > EMA200 + EMA200 steigt
   F2 — Nicht zu extended:    Preis max. 12% über Daily EMA50
-  F3 — Relative Stärke:      Coin/BTC Ratio-EMA steigt auf Daily
-  F4 — RS Resilienz:         Wenn BTC -2%, Coin verliert < 1%
-  F5 — 4H EMA20 Pullback:    Preis max. 2% von 4H EMA20 entfernt
-  F6 — VCP Kompression:      Kerzen + Volumen trocknen aus
+  F3 — 30-Tage-Hoch Breakout: Tagesschluss > Hoch der letzten 30 Tage  (NEU)
+  F4 — Relative Stärke:      Coin/BTC Ratio-EMA steigt auf Daily
+  F5 — RS Resilienz:         Wenn BTC -2%, Coin verliert < 1%
+  F6 — 4H EMA20 Pullback:    Preis max. 2% von 4H EMA20 entfernt
+  F7 — VCP Kompression:      Kerzen + Volumen trocknen aus
+  F8 — Bullische Bestätigung: Letzte 4H-Kerze grün (Close > Open)      (NEU)
 """
 
 from urllib.request import urlopen, Request
@@ -42,6 +44,10 @@ DEFAULT_CONFIG = {
     # VCP
     "vcp_lookback":  5,        # Kerzen für VCP-Kompression
     "vol_avg_len":   20,
+
+    # Breakout & Confirmation (NEU)
+    "breakout_days":  30,      # Tagesschluss muss N-Tage-Hoch durchbrechen
+    "confirm_candle": True,    # Letzte 4H-Kerze muss bullisch schließen (grün)
 
     "session":       None,     # None = 24/7 (Krypto)
 }
@@ -270,6 +276,8 @@ def check_new_setup(daily_candles, candles_4h, btc_daily, config=None):
         return None
 
     d_closes = [c["close"]  for c in daily_candles]
+    d_highs  = [c["high"]   for c in daily_candles]
+    h4_opens  = [c["open"]   for c in candles_4h]
     h4_closes = [c["close"]  for c in candles_4h]
     h4_highs  = [c["high"]   for c in candles_4h]
     h4_lows   = [c["low"]    for c in candles_4h]
@@ -296,7 +304,22 @@ def check_new_setup(daily_candles, candles_4h, btc_daily, config=None):
         return {"pass": False, "watch": False,
                 "reason": f"Zu extended: +{round(ext_pct,1)}% über Daily EMA50"}
 
-    # ── F3: Relative Stärke (Coin/BTC Ratio steigt) ───────────────────────
+    # ── F3: 30-Tage-Hoch Breakout (Minervini-Stil) ────────────────────────
+    bd = cfg["breakout_days"]
+    if len(d_highs) >= bd + 1:
+        prior_high = max(d_highs[-(bd + 1):-1])   # Hoch der letzten 30 Tage OHNE heute
+        f3_breakout = cur_daily > prior_high
+        breakout_diff = round((cur_daily - prior_high) / prior_high * 100, 2)
+    else:
+        f3_breakout   = True   # zu wenig Daten → Filter überspringen
+        breakout_diff = 0.0
+
+    if not f3_breakout:
+        return {"pass": False, "watch": True,
+                "reason": f"Kein {bd}-Tage-Breakout (noch {breakout_diff}% darunter)",
+                "dist_pct": 0, "rsi": 0, "adx": 0}
+
+    # ── F4: Relative Stärke (Coin/BTC Ratio steigt) ───────────────────────
     f3_ok = True
     if len(btc_daily) >= 30:
         try:
@@ -354,17 +377,33 @@ def check_new_setup(daily_candles, candles_4h, btc_daily, config=None):
 
         f6_ok = f6_vol_ok or f6_range_ok   # mind. eine VCP-Bestätigung
 
+    # ── F8: Bullische Bestätigung (letzte 4H-Kerze grün) ──────────────────
+    # Verhindert "fallendes Messer" — wir warten bis der Pullback wirklich dreht
+    if cfg["confirm_candle"]:
+        last_open  = h4_opens[-1]
+        last_close = h4_closes[-1]
+        f8_ok = last_close > last_open   # grüne Kerze
+    else:
+        f8_ok = True
+
     # ── Watch: Trend + RS ok, aber noch kein Pullback ─────────────────────
     is_watch = f3_ok and not f5_ok
 
     # ── Alle Filter prüfen ────────────────────────────────────────────────
-    if not (f3_ok and f4_ok and f5_ok and f6_ok):
+    if not (f3_ok and f4_ok and f5_ok and f6_ok and f8_ok):
+        fail_reason = ""
+        if not f3_ok: fail_reason = "RS schwach"
+        elif not f4_ok: fail_reason = "Hält nicht bei BTC-Drop"
+        elif not f5_ok: fail_reason = f"Zu weit von 4H EMA20 ({round(dist_4h,1)}%)"
+        elif not f6_ok: fail_reason = "Keine VCP-Kompression"
+        elif not f8_ok: fail_reason = "Letzte 4H-Kerze nicht grün — keine Bestätigung"
         return {
             "pass":     False,
             "watch":    is_watch,
             "dist_pct": round(dist_4h, 2),
             "rsi":      round(calc_rsi(h4_closes, 14), 1),
             "adx":      0,
+            "reason":   fail_reason,
         }
 
     # ── SL / TP berechnen ─────────────────────────────────────────────────
@@ -383,25 +422,28 @@ def check_new_setup(daily_candles, candles_4h, btc_daily, config=None):
     rsi    = calc_rsi(h4_closes, 14)
 
     return {
-        "pass":          True,
-        "watch":         False,
-        "entry":         entry,
-        "sl":            sl,
-        "tp":            tp,
-        "sl_pct":        sl_pct,
-        "tp_pct":        tp_pct,
-        "atr":           round(atr_4h, 6),
-        "ema20":         round_price(ema20_4h),
-        "ema50_d":       round_price(ema50_d),
-        "ema200_d":      round_price(ema200_d),
-        "extension_pct": round(ext_pct, 2),
-        "dist_pct":      round(dist_4h, 2),
-        "rsi":           round(rsi, 1),
-        "adx":           0,
-        "htf_bull":      True,
-        "rs_ok":         f3_ok,
-        "resilient":     f4_ok,
-        "vcp_ok":        f6_ok,
+        "pass":           True,
+        "watch":          False,
+        "entry":          entry,
+        "sl":             sl,
+        "tp":             tp,
+        "sl_pct":         sl_pct,
+        "tp_pct":         tp_pct,
+        "atr":            round(atr_4h, 6),
+        "ema20":          round_price(ema20_4h),
+        "ema50_d":        round_price(ema50_d),
+        "ema200_d":       round_price(ema200_d),
+        "extension_pct":  round(ext_pct, 2),
+        "dist_pct":       round(dist_4h, 2),
+        "rsi":            round(rsi, 1),
+        "adx":            0,
+        "htf_bull":       True,
+        "rs_ok":          f3_ok,
+        "resilient":      f4_ok,
+        "vcp_ok":         f6_ok,
+        "breakout_ok":    f3_breakout,
+        "breakout_diff":  breakout_diff,
+        "confirm_ok":     f8_ok,
     }
 
 # ── Haupt-Scan ────────────────────────────────────────────────────────────────
@@ -459,6 +501,8 @@ def scan_all_symbols(symbols, equity=0, config=None):
                     "extension_pct": result.get("extension_pct", 0),
                     "rs_ok":         result.get("rs_ok", True),
                     "dist_pct":      result.get("dist_pct", 0),
+                    "breakout_diff": result.get("breakout_diff", 0),
+                    "confirm_ok":    result.get("confirm_ok", True),
                     "candles_15m":   candles_4h,   # 4H-Kerzen für den Chart
                 })
             elif result.get("watch"):

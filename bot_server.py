@@ -373,27 +373,35 @@ def cmd_strategie():
     coins_str = " · ".join(s.replace("USDT", "") for s in SYMBOLS)
     send(
         "📋 <b>AKTIVE STRATEGIE</b>\n"
-        "<i>RS Leader + Weinstein Stage2 + 4H VCP Pullback</i>\n"
+        "<i>RS Leader + Stage2 Breakout + 4H VCP Pullback</i>\n"
         "Long Only | Spot | Halal\n\n"
         f"📊 <b>{len(SYMBOLS)} Coins</b> werden gescannt\n"
         "🕐 Scan: stündlich + 09:00 / 16:00 / 16:45 CEST\n\n"
-        "── <b>Filter-Kaskade</b> ──────────────────\n"
+        "── <b>Filter-Kaskade (8 Filter)</b> ──────\n"
         "F1  <b>Daily Golden Cross</b>\n"
         "    EMA50 &gt; EMA200 + EMA200 steigt\n\n"
         f"F2  <b>Nicht zu extended</b>\n"
         f"    Preis max. {cfg['extension_max']}% über Daily EMA50\n\n"
-        "F3  <b>Relative Stärke (RS)</b>\n"
+        f"F3  <b>{cfg['breakout_days']}-Tage-Hoch Breakout</b> 🆕\n"
+        f"    Tagesschluss bricht {cfg['breakout_days']}-Tage-Hoch nach oben\n\n"
+        "F4  <b>Relative Stärke (RS)</b>\n"
         "    Coin/BTC Ratio-EMA steigt auf Daily\n\n"
-        f"F4  <b>RS Resilienz</b>\n"
+        f"F5  <b>RS Resilienz</b>\n"
         f"    Wenn BTC {cfg['btc_drop_min']}%, Coin verliert &lt; {abs(cfg['coin_max_drop'])}%\n\n"
-        f"F5  <b>4H EMA20 Pullback</b>\n"
+        f"F6  <b>4H EMA20 Pullback</b>\n"
         f"    Preis max. {cfg['prox_pct']}% von 4H EMA20 entfernt\n\n"
-        "F6  <b>VCP Kompression</b>\n"
+        "F7  <b>VCP Kompression</b>\n"
         "    Kerzen + Volumen trocknen auf 4H aus\n\n"
+        "F8  <b>Bullische Bestätigung</b> 🆕\n"
+        "    Letzte 4H-Kerze grün — kein fallendes Messer\n\n"
         "── <b>SL / TP</b> ─────────────────────────\n"
         f"SL  Swing-Low (letzte {cfg['swing_len']} × 4H-Kerzen) − {cfg['atr_mult']}×ATR\n"
         f"TP  Entry + {int(cfg['crv'])}× Risiko  (CRV {int(cfg['crv'])}:1)\n"
         "💰 Risiko  1% des Kapitals pro Trade\n\n"
+        "── <b>Setup-Bestätigung</b> ──────────────\n"
+        "Bei jedem Signal kommen <b>2 Buttons</b>:\n"
+        "  ✅ <b>JA, TRADEN</b> → Order wird platziert\n"
+        "  ❌ <b>NEIN, ABLEHNEN</b> → Setup verworfen\n\n"
         "── <b>Coins</b> ───────────────────────────\n"
         f"<code>{coins_str}</code>"
     )
@@ -882,8 +890,10 @@ def do_scan(triggered_by_command=False, show_loading=True, scan_label=""):
             _sl_alerted[s["symbol"]] = alert_key
 
             chart   = generate_chart(s["symbol"], s["candles_15m"], s["entry"], s["sl"], s["tp"])
-            ext_tag = f"+{s.get('extension_pct', 0)}% D-EMA50"
-            rs_tag  = "RS ✅" if s.get("rs_ok", True) else "RS ⚠️"
+            ext_tag      = f"+{s.get('extension_pct', 0)}% D-EMA50"
+            rs_tag       = "RS ✅" if s.get("rs_ok", True) else "RS ⚠️"
+            breakout_tag = f"BO +{s.get('breakout_diff', 0)}%"   # 30-Tage-Hoch durchbrochen
+            confirm_tag  = "🟢 Bestätigt" if s.get("confirm_ok", True) else "⚪"
 
             # ── BTC Zone-Filter: Setup blockieren wenn BTC < 1% von Liq-Zone ──
             near, warn = btc_near_zone(threshold_pct=1.0)
@@ -901,7 +911,8 @@ def do_scan(triggered_by_command=False, show_loading=True, scan_label=""):
                     f"🤖 <b>VCP SETUP {s['coin']} 4H  |  {rs_tag}  |  {header}{now}</b>\n"
                     f"Entry: ${s['entry']}  |  SL: ${s['sl']} (-{s['sl_pct']}%)"
                     f"  |  TP: ${s['tp']} (+{s['tp_pct']}%)\n"
-                    f"RSI: {s['rsi']}  |  Ext: {ext_tag}  |  Stage2 ✅ VCP ✅\n"
+                    f"RSI: {s['rsi']}  |  Ext: {ext_tag}  |  {breakout_tag}\n"
+                    f"Stage2 ✅  VCP ✅  {confirm_tag}\n"
                     f"<i>AUTO_TRADE aktiv — Order wird platziert...</i>"
                 )
                 send_photo(chart, caption=caption)
@@ -928,7 +939,8 @@ def do_scan(triggered_by_command=False, show_loading=True, scan_label=""):
                     f"🎯 <b>VCP SETUP {s['coin']} 4H  |  {rs_tag}  |  {header}{now}</b>\n"
                     f"Entry: ${s['entry']}  |  SL: ${s['sl']} (-{s['sl_pct']}%)"
                     f"  |  TP: ${s['tp']} (+{s['tp_pct']}%)\n"
-                    f"RSI: {s['rsi']}  |  Ext: {ext_tag}  |  Stage2 ✅ VCP ✅\n"
+                    f"RSI: {s['rsi']}  |  Ext: {ext_tag}  |  {breakout_tag}\n"
+                    f"Stage2 ✅  VCP ✅  {confirm_tag}\n\n"
                     f"👇 <b>Möchtest du diesen Trade ausführen?</b>"
                 )
                 send_photo_with_buttons(chart, caption=caption, symbol=s["symbol"])
@@ -1191,12 +1203,13 @@ def morning_briefing(force=False):
     if setups:
         scan_text = ""
         for s in setups:
-            rs_tag  = "RS ✅" if s.get("rs_ok", True) else "RS ⚠️"
-            ext_tag = f"+{s.get('extension_pct', 0)}% D-EMA50"
+            rs_tag       = "RS ✅" if s.get("rs_ok", True) else "RS ⚠️"
+            ext_tag      = f"+{s.get('extension_pct', 0)}% D-EMA50"
+            breakout_tag = f"BO +{s.get('breakout_diff', 0)}%"
             scan_text += (
-                f"\n🎯 <b>{s['coin']} LONG — 4H VCP</b>\n"
+                f"\n🎯 <b>{s['coin']} LONG — 4H VCP Breakout</b>\n"
                 f"Entry: ${s['entry']}  SL: ${s['sl']} (-{s['sl_pct']}%)  TP: ${s['tp']} (+{s['tp_pct']}%)\n"
-                f"RSI: {s['rsi']}  |  {ext_tag}  |  {rs_tag}  Stage2 ✅"
+                f"RSI: {s['rsi']}  |  {ext_tag}  |  {breakout_tag}  |  {rs_tag}  Stage2 ✅"
             )
     elif watch:
         watch_str = "  |  ".join(f"{w['coin']} ({w['dist_pct']:+.2f}%)" for w in watch)
