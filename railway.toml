@@ -1,6 +1,7 @@
-[build]
-builder = "nixpacks"
+﻿[build]
+builder = "NIXPACKS"
 
 [deploy]
 startCommand = "python bot_server.py"
-restartPolicyType = "always"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

@@ -1,42 +1,60 @@
 """
-EMA Sniper Strategy — 7-Filter Logic (Pine Script v6 Port)
-API-agnostisch: nimmt OHLCV-Dicts, gibt Setup-Dict zurück.
+strategy.py
+Neue Strategie — RS Leader + Weinstein Stage 2 (Daily) + 4H VCP Pullback
+Long Only | Spot | Halal
 
-Einsatz: Krypto (Binance 15m + 1H) und später Aktien (gleiche Logik, andere Quelle).
+Inspiriert von: Kristjan Qullamaggie, Mark Minervini, Pradeep Bonde
+
+Filter-Kaskade:
+  F1 — Daily Golden Cross:   EMA50 > EMA200 + EMA200 steigt
+  F2 — Nicht zu extended:    Preis max. 12% über Daily EMA50
+  F3 — Relative Stärke:      Coin/BTC Ratio-EMA steigt auf Daily
+  F4 — RS Resilienz:         Wenn BTC -2%, Coin verliert < 1%
+  F5 — 4H EMA20 Pullback:    Preis max. 2% von 4H EMA20 entfernt
+  F6 — VCP Kompression:      Kerzen + Volumen trocknen aus
 """
+
 from urllib.request import urlopen, Request
 from urllib.parse import urlencode
 import json, time, hmac, hashlib
 import requests
 
-# ── Default Config (spiegelt Pine Script Inputs) ───────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 DEFAULT_CONFIG = {
-    "ema_lens":    [20, 50, 100, 200],
-    "atr_len":     14,
-    "atr_mult":    1.5,
-    "swing_len":   7,       # Optimizer: 7 → PF 1.50 (war 5)
-    "crv":         2.0,
-    "prox_pct":    0.3,     # Optimizer: 0.3% → PF 1.50 (war 0.5%)
-    "rsi_len":     14,
-    "adx_len":     14,
-    "adx_min":     25.0,
-    "vol_mult":    1.2,
-    "range_mult":  0.8,
-    "vol_avg_len": 20,
-    # session: None = 24/7 (Krypto).
-    # Für Aktien: {"start": "15:30", "end": "22:00", "close_before": "21:45"}
-    "session":     None,
+    # Indikatoren
+    "ema_lens":      [20, 50, 100, 200],
+    "atr_len":       14,
+    "rs_period":     20,       # EMA-Periode für Coin/BTC Ratio
+
+    # Entry-Filter
+    "prox_pct":      2.0,      # Max % Abstand von 4H EMA20 (Entry-Zone)
+    "extension_max": 12.0,     # Max % über Daily EMA50 (kein FOMO)
+
+    # SL / TP
+    "atr_mult":      0.5,      # SL = Swing-Low − atr_mult × ATR
+    "swing_len":     10,       # 4H-Kerzen rückwärts für Swing-Low
+    "crv":           2.0,      # Chance-Risiko-Verhältnis (TP = Entry + 2×Risiko)
+
+    # RS Resilienz
+    "btc_drop_min":  -2.0,     # BTC-Rückgang-Schwelle (%)
+    "coin_max_drop": -1.0,     # Max. akzeptabler Coin-Rückgang wenn BTC fällt (%)
+
+    # VCP
+    "vcp_lookback":  5,        # Kerzen für VCP-Kompression
+    "vol_avg_len":   20,
+
+    "session":       None,     # None = 24/7 (Krypto)
 }
 
-# ── Preis-Formatierung ─────────────────────────────────────────────────────────
+# ── Preis-Formatierung ────────────────────────────────────────────────────────
 def round_price(v):
     if v > 100: return round(v, 2)
     if v > 1:   return round(v, 4)
     return round(v, 5)
 
-# ── Indikatoren ────────────────────────────────────────────────────────────────
+# ── Indikatoren ───────────────────────────────────────────────────────────────
 def calc_ema(series, n):
-    """Standard EMA, alpha = 2/(n+1). Entspricht Pine Script ta.ema()."""
+    """Standard EMA, alpha = 2/(n+1)."""
     if len(series) < 2:
         return series[-1] if series else 0.0
     k, e = 2 / (n + 1), series[0]
@@ -45,10 +63,7 @@ def calc_ema(series, n):
     return e
 
 def _rma_series(series, n):
-    """
-    Wilder's Smoothing (RMA) als Serie — exakt wie Pine Script ta.rma().
-    Seed = SMA der ersten n Werte, dann iterativ geglättet.
-    """
+    """Wilder's Smoothing (RMA) als Serie — wie Pine Script ta.rma()."""
     if not series:
         return []
     seed_n = min(n, len(series))
@@ -60,7 +75,7 @@ def _rma_series(series, n):
     return result
 
 def calc_atr(highs, lows, closes, n=14):
-    """ATR via Wilder's RMA — wie Pine Script ta.atr()."""
+    """ATR via Wilder's RMA."""
     tr = []
     for i in range(1, len(closes)):
         tr.append(max(
@@ -70,11 +85,10 @@ def calc_atr(highs, lows, closes, n=14):
         ))
     if not tr:
         return 0.0
-    rma = _rma_series(tr, n)
-    return rma[-1]
+    return _rma_series(tr, n)[-1]
 
 def calc_rsi(closes, n=14):
-    """RSI via Wilder's RMA — wie Pine Script ta.rsi()."""
+    """RSI via Wilder's RMA."""
     gains, losses = [], []
     for i in range(1, len(closes)):
         d = closes[i] - closes[i - 1]
@@ -89,10 +103,7 @@ def calc_rsi(closes, n=14):
     return 100 - 100 / (1 + avg_g / avg_l)
 
 def calc_adx(highs, lows, closes, n=14):
-    """
-    ADX via Wilder's RMA — exakt wie Pine Script ta.dmi().
-    Gibt (di_plus, di_minus, adx) zurück.
-    """
+    """ADX via Wilder's RMA."""
     dm_plus, dm_minus, tr_list = [], [], []
     for i in range(1, len(closes)):
         up   = highs[i] - highs[i - 1]
@@ -104,14 +115,11 @@ def calc_adx(highs, lows, closes, n=14):
             abs(highs[i] - closes[i - 1]),
             abs(lows[i]  - closes[i - 1]),
         ))
-
     if len(tr_list) < n:
         return 0.0, 0.0, 0.0
-
     s_dm_plus  = _rma_series(dm_plus,  n)
     s_dm_minus = _rma_series(dm_minus, n)
     s_tr       = _rma_series(tr_list,  n)
-
     dx_list, di_p_list, di_m_list = [], [], []
     for i in range(len(s_tr)):
         atr_i = s_tr[i]
@@ -121,15 +129,13 @@ def calc_adx(highs, lows, closes, n=14):
         di_m_list.append(di_m)
         denom = di_p + di_m
         dx_list.append(100 * abs(di_p - di_m) / denom if denom > 0 else 0.0)
-
-    adx   = _rma_series(dx_list, n)[-1]
-    di_p  = di_p_list[-1]  if di_p_list  else 0.0
-    di_m  = di_m_list[-1] if di_m_list else 0.0
+    adx  = _rma_series(dx_list, n)[-1]
+    di_p = di_p_list[-1] if di_p_list else 0.0
+    di_m = di_m_list[-1] if di_m_list else 0.0
     return di_p, di_m, adx
 
-# ── Binance Signed Requests ────────────────────────────────────────────────────
-def _binance_signed(method: str, path: str, params: dict, api_key: str, api_secret: str) -> dict:
-    """Führt einen signierten Binance API-Request aus (GET oder POST)."""
+# ── Binance Signed Requests ───────────────────────────────────────────────────
+def _binance_signed(method, path, params, api_key, api_secret):
     params["timestamp"] = int(time.time() * 1000)
     query = urlencode(sorted(params.items()))
     sig   = hmac.new(api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
@@ -142,9 +148,8 @@ def _binance_signed(method: str, path: str, params: dict, api_key: str, api_secr
     resp.raise_for_status()
     return resp.json()
 
-# ── Binance Account ────────────────────────────────────────────────────────────
-def get_binance_usdt_balance(api_key: str, api_secret: str, fallback: float = 0.0) -> float:
-    """Holt das freie USDT-Guthaben vom Binance Spot Account."""
+# ── Binance Account ───────────────────────────────────────────────────────────
+def get_binance_usdt_balance(api_key, api_secret, fallback=0.0):
     if not api_key or not api_secret:
         return fallback
     try:
@@ -156,14 +161,10 @@ def get_binance_usdt_balance(api_key: str, api_secret: str, fallback: float = 0.
         pass
     return fallback
 
-
-# ── Order Execution ────────────────────────────────────────────────────────────
-def get_symbol_filters(symbol: str) -> dict:
-    """Holt LOT_SIZE (stepSize), PRICE_FILTER (tickSize) und MIN_NOTIONAL."""
-    resp = requests.get(
-        "https://api.binance.com/api/v3/exchangeInfo",
-        params={"symbol": symbol}, timeout=10
-    )
+# ── Order Execution ───────────────────────────────────────────────────────────
+def get_symbol_filters(symbol):
+    resp   = requests.get("https://api.binance.com/api/v3/exchangeInfo",
+                          params={"symbol": symbol}, timeout=10)
     result = {"step_size": 0.00001, "tick_size": 0.01, "min_notional": 10.0}
     for f in resp.json()["symbols"][0]["filters"]:
         if f["filterType"] == "LOT_SIZE":
@@ -174,26 +175,23 @@ def get_symbol_filters(symbol: str) -> dict:
             result["min_notional"] = float(f.get("minNotional", f.get("notional", 10.0)))
     return result
 
-def _floor_step(qty: float, step: float) -> float:
+def _floor_step(qty, step):
     import math
     if step <= 0:
         return qty
     decimals = max(0, len(f"{step:.10f}".rstrip("0").split(".")[-1]))
     return round(math.floor(qty / step) * step, decimals)
 
-def _round_tick(price: float, tick: float) -> float:
+def _round_tick(price, tick):
     if tick <= 0:
         return price
     decimals = max(0, len(f"{tick:.10f}".rstrip("0").split(".")[-1]))
     return round(round(price / tick) * tick, decimals)
 
-def execute_trade(symbol: str, entry: float, sl: float, tp: float,
-                  equity: float, api_key: str, api_secret: str) -> dict:
+def execute_trade(symbol, entry, sl, tp, equity, api_key, api_secret):
     """
-    Market Buy + OCO Sell (SL + TP) in einem Aufruf.
+    Market Buy + OCO Sell (SL + TP).
     Positionsgrösse = 1% Risiko / SL-Abstand.
-
-    Returns: {"ok": True, "qty": float, ...} oder {"ok": False, "error": str}
     """
     try:
         filters      = get_symbol_filters(symbol)
@@ -214,8 +212,8 @@ def execute_trade(symbol: str, entry: float, sl: float, tp: float,
         }, api_key, api_secret)
         filled_qty = _floor_step(float(buy.get("executedQty", qty)), step_size)
 
-        tp_price = _round_tick(tp, tick_size)
-        sl_price = _round_tick(sl, tick_size)
+        tp_price = _round_tick(tp,       tick_size)
+        sl_price = _round_tick(sl,       tick_size)
         sl_limit = _round_tick(sl * 0.999, tick_size)
 
         oco = _binance_signed("POST", "/api/v3/orderList/oco", {
@@ -228,11 +226,11 @@ def execute_trade(symbol: str, entry: float, sl: float, tp: float,
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-# ── Binance Daten ──────────────────────────────────────────────────────────────
-def get_candles(symbol: str, interval: str, limit: int = 300) -> list:
+# ── Binance Daten ─────────────────────────────────────────────────────────────
+def get_candles(symbol, interval, limit=300):
     """
-    Holt OHLCV-Kerzen von Binance Spot API.
-    Gibt Liste von Dicts zurück: [{"open", "high", "low", "close", "volume"}, ...]
+    OHLCV-Kerzen von Binance.
+    interval: "1d", "4h", "1h", "15m", etc.
     """
     url    = "https://api.binance.com/api/v3/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
@@ -249,158 +247,188 @@ def get_candles(symbol: str, interval: str, limit: int = 300) -> list:
         for c in resp.json()
     ]
 
-# Alias für Rückwärtskompatibilität mit bot_server.py
+# Alias für Rückwärtskompatibilität
 get_binance_candles = get_candles
 
-# ── 7-Filter Core ──────────────────────────────────────────────────────────────
-def check_ema_sniper_setup(candles_15m, candles_1h, config=None):
+# ── Neue Strategie: Haupt-Check ───────────────────────────────────────────────
+def check_new_setup(daily_candles, candles_4h, btc_daily, config=None):
     """
-    Prüft alle 7 Filter des EMA Sniper auf dem letzten geschlossenen Candle.
+    Prüft alle 6 Filter der neuen Strategie.
 
     Args:
-        candles_15m: Liste von OHLCV-Dicts (15m, mind. 250 Kerzen)
-        candles_1h:  Liste von OHLCV-Dicts (1H, mind. 250 Kerzen)
-        config:      Optionaler Config-Dict (Default = DEFAULT_CONFIG)
+        daily_candles:  OHLCV-Liste (Daily, mind. 210 Kerzen)
+        candles_4h:     OHLCV-Liste (4H,    mind. 50 Kerzen)
+        btc_daily:      OHLCV-Liste (BTC Daily, für RS-Berechnung)
+        config:         Optionaler Config-Dict
 
     Returns:
-        Dict mit Feldern:
-          pass=True  → alle 7 Filter bestanden, Setup aktiv
-          pass=False, watch=True → EMA-Stack ok, nahe EMA20, aber nicht alle Filter
-          pass=False, watch=False → kein Setup, kein Interesse
-        Oder None wenn Daten unvollständig.
+        {pass, watch, entry, sl, tp, ...} oder None bei unvollständigen Daten
     """
     cfg = {**DEFAULT_CONFIG, **(config or {})}
-    el  = cfg["ema_lens"]
 
-    if len(candles_15m) < max(el) + 20 or len(candles_1h) < max(el) + 20:
+    if len(daily_candles) < 210 or len(candles_4h) < 50:
         return None
 
-    # Arrays extrahieren (15m)
-    closes = [c["close"]  for c in candles_15m]
-    opens  = [c["open"]   for c in candles_15m]
-    highs  = [c["high"]   for c in candles_15m]
-    lows   = [c["low"]    for c in candles_15m]
-    vols   = [c["volume"] for c in candles_15m]
+    d_closes = [c["close"]  for c in daily_candles]
+    h4_closes = [c["close"]  for c in candles_4h]
+    h4_highs  = [c["high"]   for c in candles_4h]
+    h4_lows   = [c["low"]    for c in candles_4h]
+    h4_vols   = [c["volume"] for c in candles_4h]
 
-    cur_close = closes[-1]
-    cur_high  = highs[-1]
-    cur_low   = lows[-1]
+    # ── F1: Daily Golden Cross ─────────────────────────────────────────────
+    ema50_d        = calc_ema(d_closes,       50)
+    ema200_d       = calc_ema(d_closes,       200)
+    ema200_d_20ago = calc_ema(d_closes[:-20], 200)
 
-    # EMAs (15m) — 4 Staffel
-    ema20  = calc_ema(closes,       el[0])
-    ema50  = calc_ema(closes,       el[1])
-    ema100 = calc_ema(closes,       el[2])
-    ema200 = calc_ema(closes,       el[3])
+    f1_cross  = ema50_d > ema200_d            # EMA50 über EMA200
+    f1_rising = ema200_d > ema200_d_20ago     # EMA200 steigt
 
-    # EMA20-Verlauf für Trend-Filter (3 zurückliegende Werte)
-    ema20_1 = calc_ema(closes[:-1], el[0])
-    ema20_2 = calc_ema(closes[:-2], el[0])
-    ema20_3 = calc_ema(closes[:-3], el[0])
+    if not (f1_cross and f1_rising):
+        return {"pass": False, "watch": False,
+                "reason": "Kein Golden Cross / EMA200 fällt"}
 
-    # Indikatoren (15m)
-    atr = calc_atr(highs, lows, closes, cfg["atr_len"])
-    rsi = calc_rsi(closes,              cfg["rsi_len"])
-    _, _, adx = calc_adx(highs, lows, closes, cfg["adx_len"])
+    # ── F2: Nicht zu extended ─────────────────────────────────────────────
+    cur_daily  = d_closes[-1]
+    ext_pct    = (cur_daily - ema50_d) / ema50_d * 100
+    f2_ok      = ext_pct <= cfg["extension_max"]
 
-    # Volumen-SMA20 (ohne aktuelle Kerze = saubererer Vergleich)
-    vol_avg = sum(vols[-(cfg["vol_avg_len"] + 1):-1]) / cfg["vol_avg_len"]
-    cur_vol = vols[-1]
+    if not f2_ok:
+        return {"pass": False, "watch": False,
+                "reason": f"Zu extended: +{round(ext_pct,1)}% über Daily EMA50"}
 
-    # HTF 1H
-    closes_1h = [c["close"] for c in candles_1h]
-    ema20_1h  = calc_ema(closes_1h, el[0])
-    ema50_1h  = calc_ema(closes_1h, el[1])
-    ema200_1h = calc_ema(closes_1h, el[3])
-    htf_bull  = closes_1h[-1] > ema200_1h and ema20_1h > ema50_1h
+    # ── F3: Relative Stärke (Coin/BTC Ratio steigt) ───────────────────────
+    f3_ok = True
+    if len(btc_daily) >= 30:
+        try:
+            btc_closes = [c["close"] for c in btc_daily]
+            min_len    = min(len(d_closes), len(btc_closes), 60)
+            ratio      = [
+                d_closes[-min_len + i] / btc_closes[-min_len + i]
+                for i in range(min_len)
+            ]
+            r_ema_now  = calc_ema(ratio,       cfg["rs_period"])
+            r_ema_prev = calc_ema(ratio[:-10], cfg["rs_period"])
+            f3_ok      = r_ema_now > r_ema_prev
+        except Exception:
+            f3_ok = True   # API-Fehler → Filter überspringen
 
-    dist_pct = (cur_close - ema20) / ema20 * 100
+    # ── F4: RS Resilienz (hält wenn BTC fällt) ────────────────────────────
+    f4_ok = True
+    if len(btc_daily) >= 30:
+        try:
+            btc_closes = [c["close"] for c in btc_daily]
+            n          = min(30, len(d_closes), len(btc_closes))
+            btc_last   = btc_closes[-n:]
+            coin_last  = d_closes[-n:]
+            drops      = 0
+            for i in range(1, n):
+                btc_chg  = (btc_last[i]  - btc_last[i - 1]) / btc_last[i - 1]  * 100
+                if btc_chg <= cfg["btc_drop_min"]:
+                    drops += 1
+                    coin_chg = (coin_last[i] - coin_last[i - 1]) / coin_last[i - 1] * 100
+                    if coin_chg < cfg["coin_max_drop"]:
+                        f4_ok = False
+                        break
+            if drops == 0:
+                f4_ok = True   # keine BTC-Einbrüche in letzten 30 Tagen
+        except Exception:
+            f4_ok = True
 
-    # ── Die 7 Filter ──────────────────────────────────────────────────────────
-    f1_stack     = ema20 > ema50 and ema50 > ema100 and ema100 > ema200
-    f2_trend     = ema20 > ema20_1 and ema20_1 > ema20_2 and ema20_2 > ema20_3
-    f3_prox      = abs(dist_pct) <= cfg["prox_pct"]
-    f4_rsi       = 30 <= rsi <= 70
-    f5_adx       = adx > cfg["adx_min"]
-    f6_range_vol = (cur_high - cur_low) > atr * cfg["range_mult"] and cur_vol >= vol_avg * cfg["vol_mult"]
-    f7_htf       = htf_bull
+    # ── F5: 4H EMA20 Pullback (max. 2% Abstand) ───────────────────────────
+    ema20_4h = calc_ema(h4_closes, 20)
+    cur_4h   = h4_closes[-1]
+    dist_4h  = (cur_4h - ema20_4h) / ema20_4h * 100
+    f5_ok    = -1.0 <= dist_4h <= cfg["prox_pct"]   # knapp über oder an EMA20
 
-    filters = {
-        "stack":     f1_stack,
-        "trend":     f2_trend,
-        "prox":      f3_prox,
-        "rsi":       f4_rsi,
-        "adx":       f5_adx,
-        "range_vol": f6_range_vol,
-        "htf":       f7_htf,
-    }
+    # ── F6: VCP — Kerzen & Volumen trocknen aus ────────────────────────────
+    lb = cfg["vcp_lookback"]
+    f6_ok = True
+    if len(h4_vols) >= lb * 2 and len(h4_highs) >= lb * 2:
+        vol_recent    = sum(h4_vols[-(lb):])     / lb
+        vol_prev      = sum(h4_vols[-(lb*2):-lb]) / lb
+        f6_vol_ok     = vol_recent < vol_prev * 0.9
 
-    base_info = {
-        "ema20":    round_price(ema20),
-        "ema50":    round_price(ema50),
-        "ema100":   round_price(ema100),
-        "ema200":   round_price(ema200),
-        "rsi":      round(rsi,  1),
-        "adx":      round(adx,  1),
-        "htf_bull": htf_bull,
-        "dist_pct": round(dist_pct, 2),
-        "filters":  filters,
-    }
+        ranges_recent = sum(h4_highs[-i] - h4_lows[-i] for i in range(1, lb + 1))     / lb
+        ranges_prev   = sum(h4_highs[-i] - h4_lows[-i] for i in range(lb + 1, lb * 2 + 1)) / lb
+        f6_range_ok   = ranges_recent < ranges_prev
 
-    if not (f1_stack and f2_trend and f3_prox and f4_rsi and f5_adx and f6_range_vol and f7_htf):
-        watch = f1_stack and f2_trend and abs(dist_pct) <= cfg["prox_pct"] * 2
-        return {"pass": False, "watch": watch, **base_info}
+        f6_ok = f6_vol_ok or f6_range_ok   # mind. eine VCP-Bestätigung
 
-    # ── SL / TP berechnen ─────────────────────────────────────────────────────
-    swing_low = min(lows[-cfg["swing_len"]:])
-    sl        = round_price(swing_low - atr * cfg["atr_mult"])
-    entry     = round_price(cur_close)
+    # ── Watch: Trend + RS ok, aber noch kein Pullback ─────────────────────
+    is_watch = f3_ok and not f5_ok
+
+    # ── Alle Filter prüfen ────────────────────────────────────────────────
+    if not (f3_ok and f4_ok and f5_ok and f6_ok):
+        return {
+            "pass":     False,
+            "watch":    is_watch,
+            "dist_pct": round(dist_4h, 2),
+            "rsi":      round(calc_rsi(h4_closes, 14), 1),
+            "adx":      0,
+        }
+
+    # ── SL / TP berechnen ─────────────────────────────────────────────────
+    swing_low = min(h4_lows[-cfg["swing_len"]:])
+    atr_4h    = calc_atr(h4_highs, h4_lows, h4_closes, cfg["atr_len"])
+    entry     = round_price(cur_4h)
+    sl        = round_price(swing_low - atr_4h * cfg["atr_mult"])
     risk_dist = entry - sl
 
-    if risk_dist <= 0:
-        return {"pass": False, "watch": False, **base_info}
+    if risk_dist <= 0 or sl <= 0:
+        return {"pass": False, "watch": False, "reason": "SL ungültig"}
 
     tp     = round_price(entry + risk_dist * cfg["crv"])
     sl_pct = round(risk_dist / entry * 100, 2)
     tp_pct = round(risk_dist * cfg["crv"] / entry * 100, 2)
+    rsi    = calc_rsi(h4_closes, 14)
 
     return {
-        "pass":    True,
-        "watch":   False,
-        "entry":   entry,
-        "sl":      sl,
-        "tp":      tp,
-        "sl_pct":  sl_pct,
-        "tp_pct":  tp_pct,
-        "atr":     round(atr, 6),
-        **base_info,
+        "pass":          True,
+        "watch":         False,
+        "entry":         entry,
+        "sl":            sl,
+        "tp":            tp,
+        "sl_pct":        sl_pct,
+        "tp_pct":        tp_pct,
+        "atr":           round(atr_4h, 6),
+        "ema20":         round_price(ema20_4h),
+        "ema50_d":       round_price(ema50_d),
+        "ema200_d":      round_price(ema200_d),
+        "extension_pct": round(ext_pct, 2),
+        "dist_pct":      round(dist_4h, 2),
+        "rsi":           round(rsi, 1),
+        "adx":           0,
+        "htf_bull":      True,
+        "rs_ok":         f3_ok,
+        "resilient":     f4_ok,
+        "vcp_ok":        f6_ok,
     }
 
-# ── Haupt-Scan ─────────────────────────────────────────────────────────────────
+# ── Haupt-Scan ────────────────────────────────────────────────────────────────
 def scan_all_symbols(symbols, equity=0, config=None):
     """
-    Scannt alle Symbole mit EMA Sniper Strategie (7 Filter).
-
-    Args:
-        symbols: Liste von Binance-Symbol-Strings (z.B. ["BTCUSDT", ...])
-        equity:  Gesamtkapital in USD (für 1%-Risiko Position Sizing)
-        config:  Optionaler Config-Dict
+    Scannt alle Symbole mit der neuen Strategie (Daily + 4H + BTC-RS).
 
     Returns:
         (setups, watch, errors)
-        setups: Liste von Dicts mit vollständigem Setup inkl. candles_15m
-        watch:  Liste von Dicts {"coin", "dist_pct", "rsi", "adx", "filters"}
-        errors: Liste von Strings (Coin + Fehlergrund)
     """
     cfg      = {**DEFAULT_CONFIG, **(config or {})}
     risk_usd = equity * 0.01 if equity > 0 else 100
     setups, watch, errors = [], [], []
 
+    # BTC Daily einmal laden (für RS-Berechnung aller Coins)
+    btc_daily = []
+    try:
+        btc_daily = get_candles("BTCUSDT", "1d", 300)
+    except Exception:
+        print("[Scan] BTC Daily nicht verfügbar — RS-Filter übersprungen", flush=True)
+
     for sym in symbols:
         coin = sym.replace("USDT", "")
         try:
-            candles_15m = get_candles(sym, "15m", 300)
-            candles_1h  = get_candles(sym, "1h",  300)
-            result      = check_ema_sniper_setup(candles_15m, candles_1h, cfg)
+            daily_candles = get_candles(sym, "1d", 300)
+            candles_4h    = get_candles(sym, "4h", 100)
+            result        = check_new_setup(daily_candles, candles_4h, btc_daily, cfg)
 
             if result is None:
                 errors.append(f"{coin} (Daten unvollständig)")
@@ -413,33 +441,37 @@ def scan_all_symbols(symbols, equity=0, config=None):
                 pos_size  = round(risk_usd / risk_dist, 4) if risk_dist > 0 else 0
                 pos_val   = round(pos_size * entry, 2)
                 setups.append({
-                    "coin":        coin,
-                    "symbol":      sym,
-                    "entry":       entry,
-                    "sl":          sl,
-                    "tp":          result["tp"],
-                    "sl_pct":      result["sl_pct"],
-                    "tp_pct":      result["tp_pct"],
-                    "pos_size":    pos_size,
-                    "pos_val":     pos_val,
-                    "risk_usd":    risk_usd,
-                    "rsi":         result["rsi"],
-                    "adx":         result["adx"],
-                    "htf_bull":    result["htf_bull"],
-                    "ema20":       result["ema20"],
-                    "atr":         result["atr"],
-                    "candles_15m": candles_15m,
+                    "coin":          coin,
+                    "symbol":        sym,
+                    "entry":         entry,
+                    "sl":            sl,
+                    "tp":            result["tp"],
+                    "sl_pct":        result["sl_pct"],
+                    "tp_pct":        result["tp_pct"],
+                    "pos_size":      pos_size,
+                    "pos_val":       pos_val,
+                    "risk_usd":      risk_usd,
+                    "rsi":           result["rsi"],
+                    "adx":           result.get("adx", 0),
+                    "htf_bull":      True,
+                    "ema20":         result["ema20"],
+                    "atr":           result["atr"],
+                    "extension_pct": result.get("extension_pct", 0),
+                    "rs_ok":         result.get("rs_ok", True),
+                    "dist_pct":      result.get("dist_pct", 0),
+                    "candles_15m":   candles_4h,   # 4H-Kerzen für den Chart
                 })
             elif result.get("watch"):
                 watch.append({
                     "coin":     coin,
-                    "dist_pct": result["dist_pct"],
-                    "rsi":      result["rsi"],
-                    "adx":      result["adx"],
-                    "filters":  result["filters"],
+                    "dist_pct": result.get("dist_pct", 0),
+                    "rsi":      result.get("rsi", 0),
+                    "adx":      result.get("adx", 0),
+                    "filters":  {},
                 })
 
-        except Exception:
-            errors.append(f"{coin} (Fehler)")
+        except Exception as e:
+            errors.append(f"{coin} (Fehler: {e})")
+            print(f"[Scan] {coin} Fehler: {e}", flush=True)
 
     return setups, watch, errors

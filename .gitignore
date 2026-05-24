@@ -1,18 +1,22 @@
-# Secrets – niemals committen
+﻿# Secrets
 telegram_config.json
 binance_config.json
+
+# Lokale Datendateien
 alarms.json
 alarm_inbox.json
+pending_setups.json
+accepted_trades.txt
+signals.log
 
-# Logs & Temp
-*.log
-_*.py
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
 
-# Excel Output
-trade_journal.xlsx
-
-# Node
+# Node.js
 node_modules/
-package-lock.json
+
+# Lokale Testdateien
+_test_*.py
+_check_*.py
