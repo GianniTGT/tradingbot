@@ -276,27 +276,10 @@ def cmd_status():
     hour_min = now_dt.hour * 60 + now_dt.minute
     days_de  = ["Montag","Dienstag","Mittwoch","Donnerstag","Freitag","Samstag","Sonntag"]
 
-    # ── BTC 1H EMA20 — Plan A oder Plan B ────────────────────────────────────
+    # ── BTC Status ────────────────────────────────────────────────────────────
     btc_bullish, btc_emoji, btc_desc = get_btc_status()
-    if btc_bullish:
-        mode_line = f"🟢 <b>Plan A — Krypto aktiv</b>\n{btc_desc}"
-        coins_line = "📊 25 Coins: ETH · SOL · BNB · XRP · ADA · AVAX · LINK · AAVE · LTC · ..."
-    else:
-        mode_line = f"🔴 <b>Plan B — US-Aktien aktiv</b>\n{btc_desc}"
-        coins_line = "📊 Aktien: AAPL · TSLA · NVDA · MSFT · GOOGL · PG · JNJ"
-
-    # ── US-Markt Status ───────────────────────────────────────────────────────
-    market_open = weekday < 5 and (15*60+30) <= hour_min <= (21*60+30)
-    if weekday >= 5:
-        market_line = f"📈 US-Markt: <b>GESCHLOSSEN</b> ({days_de[weekday]})"
-    elif market_open:
-        mins_left = (21*60+30) - hour_min
-        market_line = f"📈 US-Markt: <b>OFFEN</b> 🟢  schliesst in {mins_left//60}h {mins_left%60}min"
-    elif hour_min < 15*60+30:
-        mins_to = (15*60+30) - hour_min
-        market_line = f"📈 US-Markt: <b>GESCHLOSSEN</b> 🔴  öffnet in {mins_to//60}h {mins_to%60}min"
-    else:
-        market_line = f"📈 US-Markt: <b>GESCHLOSSEN</b> 🔴  öffnet morgen 15:30"
+    mode_line = f"{btc_emoji} <b>Markt-Lage</b>\n{btc_desc}"
+    coins_line = f"📊 {len(SYMBOLS)} Coins: ETH · SOL · BNB · XRP · ADA · AVAX · ... ({len(SYMBOLS)} insgesamt)"
 
     # ── Nächste Scans ─────────────────────────────────────────────────────────
     scan_line = "🕐 Scans: 09:00 Briefing  |  16:00 Screener  |  16:45 Signal  |  stündlich"
@@ -325,7 +308,6 @@ def cmd_status():
         f"📡 <b>STATUS — {now_dt.strftime('%H:%M')} CEST</b>\n{'─'*30}\n\n"
         f"{mode_line}\n"
         f"{coins_line}\n\n"
-        f"{market_line}\n"
         f"{scan_line}\n\n"
         f"{alarm_line}\n"
         f"{trade_line}\n"
@@ -860,22 +842,12 @@ def handle_callback_query(cq):
 
 def do_scan(triggered_by_command=False, show_loading=True, scan_label=""):
     """
-    Haupt-Scan-Funktion — entscheidet BTC 1H EMA20:
-      BTC bullish (über EMA20) → Plan A: 7 Krypto-Coins
-      BTC bearish (unter EMA20) → Plan B: US-Aktien
+    Haupt-Scan-Funktion — Krypto Scan mit neuer Strategie.
+    Bärenmarkt-Schutz: Strategie filtert automatisch via Daily Golden Cross.
     """
     if triggered_by_command and show_loading:
         send("🔍 Scanne Markt... bitte warten.")
 
-    # ── BTC 1H Entscheidung: Plan A oder Plan B ───────────────────────────────
-    btc_bullish, btc_emoji, btc_desc = get_btc_status()
-
-    if not btc_bullish:
-        # Plan B: US-Aktien — Krypto pausiert
-        scan_stocks(triggered_by_command=triggered_by_command, scan_label=scan_label)
-        return
-
-    # ── Plan A: Krypto ────────────────────────────────────────────────────────
     equity  = get_equity()
     setups, watch, _ = scan_all_symbols(SYMBOLS, equity=equity)
 
