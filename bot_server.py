@@ -52,13 +52,15 @@ SYMBOLS = [
     "ETHUSDT",  "SOLUSDT",  "BNBUSDT",  "XRPUSDT",  "ADAUSDT",
     # Etablierte Mid-Caps
     "AVAXUSDT", "DOTUSDT",  "LINKUSDT", "MATICUSDT","ATOMUSDT",
-    # Neue Liquid-Coins
-    "NEARUSDT", "APTUSDT",  "ARBUSDT",  "INJUSDT",  "SUIUSDT",
-    # DeFi / Layer2
-    "OPUSDT",   "LDOUSDT",  "STXUSDT",  "RUNEUSDT", "SEIUSDT",
-    # Weitere liquide Paare
-    "TIAUSDT",  "LTCUSDT",  "AAVEUSDT", "DOGEUSDT", "FTMUSDT",
-]  # 25 liquideste Binance-Paare — RS Leader Strategie
+    # Layer 1 / Smart Contracts
+    "NEARUSDT", "APTUSDT",  "ARBUSDT",  "OPUSDT",   "SUIUSDT",
+    # Infrastructure / Utility (halal-freundlich)
+    "TONUSDT",  "FILUSDT",  "ICPUSDT",  "HBARUSDT", "IMXUSDT",
+    # DeFi / Staking / Cross-Chain
+    "INJUSDT",  "LDOUSDT",  "AAVEUSDT", "STXUSDT",  "RUNEUSDT",
+    # Weitere liquide Coins
+    "SEIUSDT",  "TIAUSDT",  "LTCUSDT",  "FTMUSDT",  "ALGOUSDT",
+]  # 30 utility-fokussierte Binance-Paare — keine Meme-Coins
 
 STOCK_SYMBOLS = ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL", "PG", "JNJ"]
 
@@ -326,7 +328,7 @@ def cmd_hilfe():
         "  16:00 — Coin-Screener (Status vor heißer Phase)\n"
         "  16:45 — Post-NY Signal (nach NY-Eröffnungsvolatilität)\n"
         "  stündlich — Stiller Hintergrund-Scan\n\n"
-        "📊 <b>25 Coins:</b> ETH · SOL · BNB · XRP · ADA · AVAX · LINK · AAVE · LTC · ...\n\n"
+        "📊 <b>30 Coins:</b> ETH · SOL · BNB · XRP · ADA · TON · FIL · ICP · HBAR · ...\n\n"
         "/scan — Manueller Scan (RS + Stage2 + 4H VCP)\n"
         "/strategie — Aktive Strategie + alle Filter anzeigen\n"
         "/briefing — Morgenbriefing manuell auslösen\n"
