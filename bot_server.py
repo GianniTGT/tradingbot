@@ -60,7 +60,9 @@ SYMBOLS = [
     "INJUSDT",  "LDOUSDT",  "AAVEUSDT", "STXUSDT",  "RUNEUSDT",
     # Weitere liquide Coins
     "SEIUSDT",  "TIAUSDT",  "LTCUSDT",  "FTMUSDT",  "ALGOUSDT",
-]  # 30 utility-fokussierte Binance-Paare — keine Meme-Coins
+    # Privacy-Coin (echte Nutzung, kein Meme)
+    "ZECUSDT",
+]  # 31 utility-fokussierte Binance-Paare — keine Meme-Coins
 
 STOCK_SYMBOLS = ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL", "PG", "JNJ"]
 
@@ -328,7 +330,7 @@ def cmd_hilfe():
         "  16:00 — Coin-Screener (Status vor heißer Phase)\n"
         "  16:45 — Post-NY Signal (nach NY-Eröffnungsvolatilität)\n"
         "  stündlich — Stiller Hintergrund-Scan\n\n"
-        "📊 <b>30 Coins:</b> ETH · SOL · BNB · XRP · ADA · TON · FIL · ICP · HBAR · ...\n\n"
+        "📊 <b>31 Coins:</b> ETH · SOL · BNB · XRP · ADA · TON · FIL · ICP · HBAR · ZEC · ...\n\n"
         "/scan — Manueller Scan (RS + Stage2 + 4H VCP)\n"
         "/strategie — Aktive Strategie + alle Filter anzeigen\n"
         "/briefing — Morgenbriefing manuell auslösen\n"
