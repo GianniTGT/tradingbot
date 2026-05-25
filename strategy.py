@@ -5,15 +5,19 @@ Long Only | Spot | Halal
 
 Inspiriert von: Kristjan Qullamaggie, Mark Minervini, Pradeep Bonde
 
-Filter-Kaskade:
-  F1 — Daily Golden Cross:   EMA50 > EMA200 + EMA200 steigt
-  F2 — Nicht zu extended:    Preis max. 12% über Daily EMA50
-  F3 — 30-Tage-Hoch Breakout: Tagesschluss > Hoch der letzten 30 Tage  (NEU)
-  F4 — Relative Stärke:      Coin/BTC Ratio-EMA steigt auf Daily
-  F5 — RS Resilienz:         Wenn BTC -2%, Coin verliert < 1%
-  F6 — 4H EMA20 Pullback:    Preis max. 2% von 4H EMA20 entfernt
-  F7 — VCP Kompression:      Kerzen + Volumen trocknen aus
-  F8 — Bullische Bestätigung: Letzte 4H-Kerze grün (Close > Open)      (NEU)
+Filter-Kaskade (Balanced Version):
+  F1 — Daily Golden Cross:    EMA50 > EMA200 + EMA200 steigt
+  F2 — Nicht zu extended:     Large Caps ≤12%, Altcoins ≤15% über Daily EMA50
+  F3 — 30-Tage-Hoch Breakout: Tagesschluss > Hoch der letzten 30 Tage
+  F4 — Relative Stärke:       Coin/BTC Ratio-EMA steigt auf Daily
+  F5 — RS Resilienz (gestaffelt):
+                              BTC -1.5% → Coin verliert ≤ 0.5%
+                              BTC -2.0% → Coin verliert ≤ 1.0%
+                              BTC -3.0% → Coin verliert ≤ 1.5%
+  F6 — 4H EMA20 Pullback:     Preis max. 3% von 4H EMA20 entfernt
+  F7 — VCP Kompression:       2 von 3 müssen erfüllt sein
+                              (Range, Volumen, ATR sinken)
+  F8 — Bullische Bestätigung: Letzte 4H-Kerze grün ODER Bullish Engulfing
 """
 
 from urllib.request import urlopen, Request
@@ -21,35 +25,45 @@ from urllib.parse import urlencode
 import json, time, hmac, hashlib
 import requests
 
+# ── Large Caps (strengere Extension-Toleranz) ─────────────────────────────────
+LARGE_CAPS = {"ETHUSDT", "BNBUSDT", "XRPUSDT", "LTCUSDT"}
+
 # ── Config ────────────────────────────────────────────────────────────────────
 DEFAULT_CONFIG = {
     # Indikatoren
-    "ema_lens":      [20, 50, 100, 200],
-    "atr_len":       14,
-    "rs_period":     20,       # EMA-Periode für Coin/BTC Ratio
+    "ema_lens":       [20, 50, 100, 200],
+    "atr_len":        14,
+    "rs_period":      20,       # EMA-Periode für Coin/BTC Ratio
 
-    # Entry-Filter
-    "prox_pct":      2.0,      # Max % Abstand von 4H EMA20 (Entry-Zone)
-    "extension_max": 12.0,     # Max % über Daily EMA50 (kein FOMO)
+    # Entry-Filter (Balanced Version)
+    "prox_pct":       3.0,      # Max % Abstand von 4H EMA20 (war 2.0)
+    "extension_large": 12.0,    # Max % über Daily EMA50 für Large Caps
+    "extension_alt":   15.0,    # Max % über Daily EMA50 für Altcoins
+    "extension_max":   15.0,    # Fallback (für Rückwärtskompatibilität)
 
-    # SL / TP
-    "atr_mult":      0.5,      # SL = Swing-Low − atr_mult × ATR
-    "swing_len":     10,       # 4H-Kerzen rückwärts für Swing-Low
-    "crv":           2.0,      # Chance-Risiko-Verhältnis (TP = Entry + 2×Risiko)
+    # SL / TP / Trailing
+    "atr_mult":       0.5,      # SL = Swing-Low − atr_mult × ATR
+    "swing_len":      10,       # 4H-Kerzen rückwärts für Swing-Low
+    "crv":            2.0,      # TP1 = Entry + 2×Risiko (50% Partial Exit)
+    "trailing_ema":   20,       # Trailing Stop folgt 4H EMA{N}
 
-    # RS Resilienz
-    "btc_drop_min":  -2.0,     # BTC-Rückgang-Schwelle (%)
-    "coin_max_drop": -1.0,     # Max. akzeptabler Coin-Rückgang wenn BTC fällt (%)
+    # RS Resilienz — gestaffelte Toleranz (BTC-Drop %, Coin max. Drop %)
+    "resilience_tiers": [
+        (-1.5, -0.5),
+        (-2.0, -1.0),
+        (-3.0, -1.5),
+    ],
 
-    # VCP
-    "vcp_lookback":  5,        # Kerzen für VCP-Kompression
-    "vol_avg_len":   20,
+    # VCP — mind. 2 von 3 müssen erfüllt sein (Range, Volumen, ATR)
+    "vcp_lookback":   5,
+    "vcp_min_hits":   2,
+    "vol_avg_len":    20,
 
-    # Breakout & Confirmation (NEU)
-    "breakout_days":  30,      # Tagesschluss muss N-Tage-Hoch durchbrechen
-    "confirm_candle": True,    # Letzte 4H-Kerze muss bullisch schließen (grün)
+    # Breakout & Confirmation
+    "breakout_days":  30,       # Tagesschluss muss N-Tage-Hoch durchbrechen
+    "confirm_candle": True,     # Letzte 4H-Kerze grün ODER bullish engulfing
 
-    "session":       None,     # None = 24/7 (Krypto)
+    "session":        None,     # None = 24/7 (Krypto)
 }
 
 # ── Preis-Formatierung ────────────────────────────────────────────────────────
@@ -257,14 +271,15 @@ def get_candles(symbol, interval, limit=300):
 get_binance_candles = get_candles
 
 # ── Neue Strategie: Haupt-Check ───────────────────────────────────────────────
-def check_new_setup(daily_candles, candles_4h, btc_daily, config=None):
+def check_new_setup(daily_candles, candles_4h, btc_daily, is_large_cap=False, config=None):
     """
-    Prüft alle 6 Filter der neuen Strategie.
+    Prüft alle 8 Filter der Balanced-Strategie.
 
     Args:
         daily_candles:  OHLCV-Liste (Daily, mind. 210 Kerzen)
         candles_4h:     OHLCV-Liste (4H,    mind. 50 Kerzen)
         btc_daily:      OHLCV-Liste (BTC Daily, für RS-Berechnung)
+        is_large_cap:   True für ETH/BNB/XRP/LTC → strengere Extension-Grenze
         config:         Optionaler Config-Dict
 
     Returns:
@@ -295,14 +310,16 @@ def check_new_setup(daily_candles, candles_4h, btc_daily, config=None):
         return {"pass": False, "watch": False,
                 "reason": "Kein Golden Cross / EMA200 fällt"}
 
-    # ── F2: Nicht zu extended ─────────────────────────────────────────────
-    cur_daily  = d_closes[-1]
-    ext_pct    = (cur_daily - ema50_d) / ema50_d * 100
-    f2_ok      = ext_pct <= cfg["extension_max"]
+    # ── F2: Nicht zu extended (Large Caps strenger als Altcoins) ──────────
+    cur_daily = d_closes[-1]
+    ext_pct   = (cur_daily - ema50_d) / ema50_d * 100
+    ext_limit = cfg["extension_large"] if is_large_cap else cfg["extension_alt"]
+    f2_ok     = ext_pct <= ext_limit
 
     if not f2_ok:
+        cap_label = "Large Cap" if is_large_cap else "Altcoin"
         return {"pass": False, "watch": False,
-                "reason": f"Zu extended: +{round(ext_pct,1)}% über Daily EMA50"}
+                "reason": f"Zu extended: +{round(ext_pct,1)}% (Grenze {cap_label}: {ext_limit}%)"}
 
     # ── F3: 30-Tage-Hoch Breakout (Minervini-Stil) ────────────────────────
     bd = cfg["breakout_days"]
@@ -335,7 +352,8 @@ def check_new_setup(daily_candles, candles_4h, btc_daily, config=None):
         except Exception:
             f3_ok = True   # API-Fehler → Filter überspringen
 
-    # ── F4: RS Resilienz (hält wenn BTC fällt) ────────────────────────────
+    # ── F4: RS Resilienz (gestaffelt: BTC-Drop bestimmt akzeptable Coin-Toleranz) ─
+    # Tier-Beispiel: BTC -1.5% → Coin max -0.5%, BTC -2% → Coin max -1%, BTC -3% → Coin max -1.5%
     f4_ok = True
     if len(btc_daily) >= 30:
         try:
@@ -343,46 +361,74 @@ def check_new_setup(daily_candles, candles_4h, btc_daily, config=None):
             n          = min(30, len(d_closes), len(btc_closes))
             btc_last   = btc_closes[-n:]
             coin_last  = d_closes[-n:]
-            drops      = 0
+            # Tiers ABSTEIGEND nach BTC-Drop (zuerst strengste Stufe prüfen)
+            tiers = sorted(cfg["resilience_tiers"], key=lambda t: t[0])
             for i in range(1, n):
-                btc_chg  = (btc_last[i]  - btc_last[i - 1]) / btc_last[i - 1]  * 100
-                if btc_chg <= cfg["btc_drop_min"]:
-                    drops += 1
-                    coin_chg = (coin_last[i] - coin_last[i - 1]) / coin_last[i - 1] * 100
-                    if coin_chg < cfg["coin_max_drop"]:
-                        f4_ok = False
-                        break
-            if drops == 0:
-                f4_ok = True   # keine BTC-Einbrüche in letzten 30 Tagen
+                btc_chg = (btc_last[i] - btc_last[i - 1]) / btc_last[i - 1] * 100
+                # Welcher Tier greift? Größter BTC-Drop ≤ btc_chg
+                matched = None
+                for btc_thresh, coin_thresh in tiers:
+                    if btc_chg <= btc_thresh:
+                        matched = (btc_thresh, coin_thresh)
+                if matched is None:
+                    continue   # BTC-Bewegung zu klein → kein Tier greift
+                coin_chg = (coin_last[i] - coin_last[i - 1]) / coin_last[i - 1] * 100
+                if coin_chg < matched[1]:
+                    f4_ok = False
+                    break
         except Exception:
             f4_ok = True
 
-    # ── F5: 4H EMA20 Pullback (max. 2% Abstand) ───────────────────────────
+    # ── F5: 4H EMA20 Pullback (max. 3% Abstand) ───────────────────────────
     ema20_4h = calc_ema(h4_closes, 20)
     cur_4h   = h4_closes[-1]
     dist_4h  = (cur_4h - ema20_4h) / ema20_4h * 100
-    f5_ok    = -1.0 <= dist_4h <= cfg["prox_pct"]   # knapp über oder an EMA20
+    f5_ok    = -1.5 <= dist_4h <= cfg["prox_pct"]   # knapp über/an EMA20 (3% Toleranz)
 
-    # ── F6: VCP — Kerzen & Volumen trocknen aus ────────────────────────────
+    # ── F6: VCP — 2 von 3 müssen erfüllt sein (Range, Volumen, ATR sinken) ─
     lb = cfg["vcp_lookback"]
-    f6_ok = True
+    vcp_hits      = 0
+    f6_range_ok   = False
+    f6_vol_ok     = False
+    f6_atr_ok     = False
     if len(h4_vols) >= lb * 2 and len(h4_highs) >= lb * 2:
-        vol_recent    = sum(h4_vols[-(lb):])     / lb
-        vol_prev      = sum(h4_vols[-(lb*2):-lb]) / lb
-        f6_vol_ok     = vol_recent < vol_prev * 0.9
-
-        ranges_recent = sum(h4_highs[-i] - h4_lows[-i] for i in range(1, lb + 1))     / lb
+        # Check 1: Range schrumpft
+        ranges_recent = sum(h4_highs[-i] - h4_lows[-i] for i in range(1, lb + 1))           / lb
         ranges_prev   = sum(h4_highs[-i] - h4_lows[-i] for i in range(lb + 1, lb * 2 + 1)) / lb
         f6_range_ok   = ranges_recent < ranges_prev
 
-        f6_ok = f6_vol_ok or f6_range_ok   # mind. eine VCP-Bestätigung
+        # Check 2: Volumen trocknet aus
+        vol_recent = sum(h4_vols[-(lb):])     / lb
+        vol_prev   = sum(h4_vols[-(lb*2):-lb]) / lb
+        f6_vol_ok  = vol_recent < vol_prev * 0.9
 
-    # ── F8: Bullische Bestätigung (letzte 4H-Kerze grün) ──────────────────
-    # Verhindert "fallendes Messer" — wir warten bis der Pullback wirklich dreht
+        # Check 3: ATR(14) sinkt
+        if len(h4_closes) >= cfg["atr_len"] + lb * 2:
+            atr_recent = calc_atr(h4_highs[-(cfg["atr_len"] + lb):],
+                                  h4_lows[-(cfg["atr_len"] + lb):],
+                                  h4_closes[-(cfg["atr_len"] + lb):], cfg["atr_len"])
+            atr_prev   = calc_atr(h4_highs[-(cfg["atr_len"] + lb * 2):-lb],
+                                  h4_lows[-(cfg["atr_len"] + lb * 2):-lb],
+                                  h4_closes[-(cfg["atr_len"] + lb * 2):-lb], cfg["atr_len"])
+            f6_atr_ok = atr_recent < atr_prev
+
+        vcp_hits = int(f6_range_ok) + int(f6_vol_ok) + int(f6_atr_ok)
+    f6_ok = vcp_hits >= cfg["vcp_min_hits"]   # 2 von 3
+
+    # ── F8: Bullische Bestätigung — grüne Kerze ODER bullish engulfing ────
     if cfg["confirm_candle"]:
         last_open  = h4_opens[-1]
         last_close = h4_closes[-1]
-        f8_ok = last_close > last_open   # grüne Kerze
+        f8_green   = last_close > last_open
+        # Bullish Engulfing: rote Vorkerze + aktuelle grüne Kerze umschließt Vorkerze
+        f8_engulf = False
+        if len(h4_opens) >= 2 and len(h4_closes) >= 2:
+            prev_open, prev_close = h4_opens[-2], h4_closes[-2]
+            f8_engulf = (last_close > last_open and          # aktuelle grün
+                         prev_close < prev_open and          # vorherige rot
+                         last_open  <= prev_close and        # öffnet ≤ vorigem Close
+                         last_close >= prev_open)            # schließt ≥ vorigem Open
+        f8_ok = f8_green or f8_engulf
     else:
         f8_ok = True
 
@@ -441,9 +487,11 @@ def check_new_setup(daily_candles, candles_4h, btc_daily, config=None):
         "rs_ok":          f3_ok,
         "resilient":      f4_ok,
         "vcp_ok":         f6_ok,
+        "vcp_hits":       vcp_hits,
         "breakout_ok":    f3_breakout,
         "breakout_diff":  breakout_diff,
         "confirm_ok":     f8_ok,
+        "is_large_cap":   is_large_cap,
     }
 
 # ── Haupt-Scan ────────────────────────────────────────────────────────────────
@@ -470,7 +518,9 @@ def scan_all_symbols(symbols, equity=0, config=None):
         try:
             daily_candles = get_candles(sym, "1d", 300)
             candles_4h    = get_candles(sym, "4h", 100)
-            result        = check_new_setup(daily_candles, candles_4h, btc_daily, cfg)
+            is_large      = sym in LARGE_CAPS
+            result        = check_new_setup(daily_candles, candles_4h, btc_daily,
+                                            is_large_cap=is_large, config=cfg)
 
             if result is None:
                 errors.append(f"{coin} (Daten unvollständig)")

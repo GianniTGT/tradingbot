@@ -18,7 +18,7 @@ from urllib.parse import urlencode
 from urllib.error import URLError
 from datetime import datetime, timedelta
 from strategy import (scan_all_symbols, get_binance_candles, get_binance_usdt_balance,
-                       execute_trade, round_price as _round_price)
+                       execute_trade, round_price as _round_price, calc_ema)
 
 CEST = timedelta(hours=2)
 def now_cest():
@@ -354,11 +354,14 @@ def cmd_hilfe():
 
 def cmd_strategie():
     """Zeigt die aktive Strategie mit allen Filtern und Parametern."""
-    from strategy import DEFAULT_CONFIG
-    cfg       = DEFAULT_CONFIG
-    coins_str = " · ".join(s.replace("USDT", "") for s in SYMBOLS)
+    from strategy import DEFAULT_CONFIG, LARGE_CAPS
+    cfg        = DEFAULT_CONFIG
+    coins_str  = " · ".join(s.replace("USDT", "") for s in SYMBOLS)
+    large_str  = ", ".join(s.replace("USDT", "") for s in LARGE_CAPS)
+    tiers      = cfg["resilience_tiers"]
+    tier_lines = "\n".join(f"    BTC {t[0]}% → Coin max {t[1]}%" for t in tiers)
     send(
-        "📋 <b>AKTIVE STRATEGIE</b>\n"
+        "📋 <b>AKTIVE STRATEGIE — Balanced Version</b>\n"
         "<i>RS Leader + Stage2 Breakout + 4H VCP Pullback</i>\n"
         "Long Only | Spot | Halal\n\n"
         f"📊 <b>{len(SYMBOLS)} Coins</b> werden gescannt\n"
@@ -366,28 +369,32 @@ def cmd_strategie():
         "── <b>Filter-Kaskade (8 Filter)</b> ──────\n"
         "F1  <b>Daily Golden Cross</b>\n"
         "    EMA50 &gt; EMA200 + EMA200 steigt\n\n"
-        f"F2  <b>Nicht zu extended</b>\n"
-        f"    Preis max. {cfg['extension_max']}% über Daily EMA50\n\n"
-        f"F3  <b>{cfg['breakout_days']}-Tage-Hoch Breakout</b> 🆕\n"
+        f"F2  <b>Nicht zu extended</b> 🔧\n"
+        f"    Large Caps: max. {cfg['extension_large']}% über Daily EMA50\n"
+        f"    Altcoins:   max. {cfg['extension_alt']}% über Daily EMA50\n\n"
+        f"F3  <b>{cfg['breakout_days']}-Tage-Hoch Breakout</b>\n"
         f"    Tagesschluss bricht {cfg['breakout_days']}-Tage-Hoch nach oben\n\n"
         "F4  <b>Relative Stärke (RS)</b>\n"
         "    Coin/BTC Ratio-EMA steigt auf Daily\n\n"
-        f"F5  <b>RS Resilienz</b>\n"
-        f"    Wenn BTC {cfg['btc_drop_min']}%, Coin verliert &lt; {abs(cfg['coin_max_drop'])}%\n\n"
-        f"F6  <b>4H EMA20 Pullback</b>\n"
+        "F5  <b>RS Resilienz (gestaffelt)</b> 🔧\n"
+        f"{tier_lines}\n\n"
+        f"F6  <b>4H EMA20 Pullback</b> 🔧\n"
         f"    Preis max. {cfg['prox_pct']}% von 4H EMA20 entfernt\n\n"
-        "F7  <b>VCP Kompression</b>\n"
-        "    Kerzen + Volumen trocknen auf 4H aus\n\n"
-        "F8  <b>Bullische Bestätigung</b> 🆕\n"
-        "    Letzte 4H-Kerze grün — kein fallendes Messer\n\n"
-        "── <b>SL / TP</b> ─────────────────────────\n"
-        f"SL  Swing-Low (letzte {cfg['swing_len']} × 4H-Kerzen) − {cfg['atr_mult']}×ATR\n"
-        f"TP  Entry + {int(cfg['crv'])}× Risiko  (CRV {int(cfg['crv'])}:1)\n"
+        f"F7  <b>VCP Kompression</b> 🔧\n"
+        f"    Mind. {cfg['vcp_min_hits']} von 3: Range/Volumen/ATR sinken\n\n"
+        "F8  <b>Bullische Bestätigung</b> 🔧\n"
+        "    Letzte 4H-Kerze grün ODER Bullish Engulfing\n\n"
+        "── <b>SL / TP — Trailing</b> 🏆 ──────────\n"
+        f"SL    Swing-Low ({cfg['swing_len']} × 4H-Kerzen) − {cfg['atr_mult']}×ATR\n"
+        "TP1   50% bei 2R sichern (Partial Exit)\n"
+        f"Trail Rest läuft mit <b>4H EMA{cfg['trailing_ema']}</b> Trailing Stop\n"
         "💰 Risiko  1% des Kapitals pro Trade\n\n"
         "── <b>Setup-Bestätigung</b> ──────────────\n"
         "Bei jedem Signal kommen <b>2 Buttons</b>:\n"
         "  ✅ <b>JA, TRADEN</b> → Order wird platziert\n"
         "  ❌ <b>NEIN, ABLEHNEN</b> → Setup verworfen\n\n"
+        "── <b>Large Caps (F2 strenger)</b> ───────\n"
+        f"<code>{large_str}</code>\n\n"
         "── <b>Coins</b> ───────────────────────────\n"
         f"<code>{coins_str}</code>"
     )
@@ -512,46 +519,86 @@ def cmd_trade(parts):
         send(f"Überwachung für {coin} ist bereits aktiv."); return
 
     def monitor_trade():
-        rr = round((tp - entry) / (entry - sl), 1)
+        # TP1 = 2R (50% Partial Exit). Übergebenes tp dient nur als Referenz.
+        risk     = entry - sl
+        tp1      = round(entry + risk * 2.0, 6)
+        tp1_pct  = round((tp1 - entry) / entry * 100, 2)
         send(
             f"✅ Trade aktiv: <b>{coin} LONG</b>\n"
-            f"Entry: ${entry}\n"
-            f"SL: ${sl} | TP: ${tp}\n"
-            f"RR: {rr}:1\n"
-            f"Du wirst benachrichtigt wenn SL oder TP erreicht wird."
+            f"Entry: ${entry}  |  SL: ${sl}\n"
+            f"TP1 (50%): ${tp1} (+{tp1_pct}% / 2R)\n"
+            f"Rest: Trailing Stop = <b>4H EMA20</b>\n"
+            f"<i>Du wirst benachrichtigt bei TP1, Trailing-Updates und Exit.</i>"
         )
-        last_update = time.time()
+        last_update    = time.time()
+        partial_taken  = False
+        trailing_stop  = sl          # startet beim originalen SL
+        last_trail_msg = trailing_stop
+
         while symbol in active_trades:
             try:
                 price = get_price(symbol)
                 now   = time.time()
 
-                # Update alle 4 Stunden
+                # Status-Update alle 4 Stunden
                 if now - last_update >= 14400:
                     pct = round((price - entry) / entry * 100, 2)
-                    send(f"📊 Update <b>{coin}</b>: ${price} ({pct:+.2f}% vom Entry)")
+                    mode = "TRAIL" if partial_taken else "INIT"
+                    send(f"📊 Update <b>{coin}</b> [{mode}]: ${price} ({pct:+.2f}% vom Entry) | Stop: ${trailing_stop}")
                     last_update = now
 
-                if price <= sl:
-                    send(
-                        f"🔴 STOP LOSS ERREICHT: <b>{coin}</b>\n"
-                        f"SL: ${sl} | Preis: ${price}\n\n"
-                        f"Trade geschlossen. Nicht stressen, nächstes Setup kommt. 💪"
-                    )
+                # Stop-Loss / Trailing Stop ausgelöst
+                if price <= trailing_stop:
+                    if partial_taken:
+                        gain_rest = round((trailing_stop - entry) / entry * 100, 2)
+                        send(
+                            f"📉 <b>TRAILING STOP — {coin}</b>\n"
+                            f"4H EMA20 unterschritten bei ${trailing_stop}\n"
+                            f"Gewinn auf Rest: {gain_rest:+.2f}%\n\n"
+                            f"Schöner Move gefangen! 🎯  Schließe Restposition."
+                        )
+                    else:
+                        send(
+                            f"🔴 <b>STOP LOSS — {coin}</b>\n"
+                            f"SL: ${trailing_stop} | Preis: ${price}\n\n"
+                            f"Trade geschlossen. Nächstes Setup kommt. 💪"
+                        )
                     active_trades.pop(symbol, None)
                     break
 
-                if price >= tp:
+                # TP1 erreicht → 50% sichern, Trailing aktivieren
+                if not partial_taken and price >= tp1:
                     send(
-                        f"🟢 TAKE PROFIT ERREICHT: <b>{coin}</b>\n"
-                        f"TP: ${tp} | Preis: ${price}\n\n"
-                        f"Perfekt! Trade schließen. 🎯"
+                        f"🎯 <b>TP1 ERREICHT — {coin}</b>\n"
+                        f"Preis: ${price}  (+{round((price-entry)/entry*100, 2)}% / 2R)\n\n"
+                        f"➡️  <b>Sichere 50% Gewinn jetzt manuell auf Binance!</b>\n"
+                        f"➡️  Stop verschoben auf Breakeven (${entry})\n"
+                        f"➡️  Rest läuft mit 4H EMA20 Trailing Stop"
                     )
-                    active_trades.pop(symbol, None)
-                    break
+                    partial_taken  = True
+                    trailing_stop  = entry          # Breakeven
+                    last_trail_msg = trailing_stop
 
-                time.sleep(20)
-            except: time.sleep(30)
+                # Trailing-Update (nur nach Partial Exit)
+                if partial_taken:
+                    try:
+                        candles_4h = get_binance_candles(symbol, "4h", 50)
+                        h4_closes  = [c["close"] for c in candles_4h]
+                        ema20_4h   = calc_ema(h4_closes, 20)
+                        # Trailing folgt EMA20 nur nach oben (Stop wird nie zurückgesetzt)
+                        new_stop   = round(max(trailing_stop, ema20_4h), 6)
+                        if new_stop > trailing_stop:
+                            trailing_stop = new_stop
+                            # Nur senden wenn signifikante Bewegung (≥1%)
+                            if abs(new_stop - last_trail_msg) / last_trail_msg >= 0.01:
+                                send(f"📈 Trailing Stop <b>{coin}</b>: ${trailing_stop} (4H EMA20)")
+                                last_trail_msg = new_stop
+                    except Exception:
+                        pass
+
+                time.sleep(60 if partial_taken else 20)
+            except Exception:
+                time.sleep(30)
 
     t = threading.Thread(target=monitor_trade, daemon=True)
     active_trades[symbol] = {"entry": entry, "sl": sl, "tp": tp, "thread": t}
