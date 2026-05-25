@@ -12,6 +12,12 @@ strength), sends setup alerts to Telegram with inline **JA/NEIN** buttons, and o
 auto-executes Market Buy + OCO orders via Binance API. Open positions are monitored with a
 **TP1 partial-exit + 4H EMA20 trailing stop**.
 
+Two companion artifacts accompany the bot:
+- `vcp_balanced.pine` — TradingView Pine v6 indicator that mirrors the 8 filters live on
+  any chart (filter table + entry/SL/TP lines).
+- `filter_explanations.py` → `filter_explanations/*.png` — print-ready A4 educational
+  charts (one per filter) for users to learn what each filter checks.
+
 ## Architecture
 
 Two files do almost everything — keep them as the boundary:
@@ -114,12 +120,31 @@ python -c "from strategy import scan_all_symbols; print(scan_all_symbols(['ETHUS
 # Test a single coin through all 8 filters
 python -c "from strategy import check_new_setup, get_candles, LARGE_CAPS; d=get_candles('ETHUSDT','1d',300); h=get_candles('ETHUSDT','4h',100); b=get_candles('BTCUSDT','1d',300); print(check_new_setup(d,h,b,is_large_cap='ETHUSDT' in LARGE_CAPS))"
 
+# Regenerate the 8 filter-explanation wall charts (A4 landscape, 200 DPI)
+python filter_explanations.py
+
 # Backtest the OLD 7-filter strategy on 6 months of data
 python backtest.py
 
 # Deploy to Railway (PowerShell blocks railway.ps1, use cmd)
 cmd /c "railway up"
 ```
+
+## Companion artifacts
+
+- **`vcp_balanced.pine`** — Pine Script v6 indicator for TradingView. Mirrors all 8 filters
+  from `strategy.py`, fetching Daily data via `request.security("1D", ...)` and 4H data via
+  `request.security("240", ...)`. Auto-detects large caps (hard-coded set
+  `ETH/BNB/XRP/LTC`) and switches `extension_large` vs `extension_alt`. Renders a movable
+  filter table (6 positions via dropdown), entry/SL/TP1 lines on signal, and emits
+  `alertcondition` on fresh setups. Pine v6 quirk: do **not** use line continuation with
+  a multiple-of-4-space indent (reserved for local function blocks) — keep multi-condition
+  expressions on one line or wrap in parens. **Keep this file in sync with `strategy.py`
+  when filter rules or `DEFAULT_CONFIG` parameters change.**
+- **`filter_explanations.py`** — Standalone matplotlib script. Generates 8 print-ready PNGs
+  in `./filter_explanations/`. F2/F3/F4 use live Binance data (NEAR/LINK/NEAR-BTC), the
+  rest use synthetic data for didactic clarity. Uses DejaVu Sans only; **don't add emoji**
+  to chart text — fall back to text symbols (`✓`, `✗`, `●`, `★`) instead.
 
 ## Working with the strategy
 
@@ -164,5 +189,7 @@ single source of Python dependencies — Nixpacks handles the rest.
   the new one.
 - `auto_scan.py` — standalone scan script for Windows Task Scheduler; superseded by the
   Railway-hosted `bot_server.py` scheduled scans but still works.
-- `*.pine` files — TradingView Pine Script versions of earlier strategies, for chart
-  visualization only, not executed by the bot.
+- Older `*.pine` files (`ema_sniper.pine`, `ema_pullback.pine`, `bnb_setup.pine`,
+  `near_setup.pine`, `setup_levels.pine`) — TradingView Pine Script versions of earlier
+  strategies, kept for reference. The current/maintained Pine script is
+  `vcp_balanced.pine` (see Companion artifacts above), not these.
