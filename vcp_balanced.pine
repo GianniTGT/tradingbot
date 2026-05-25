@@ -1,0 +1,268 @@
+//@version=6
+// ════════════════════════════════════════════════════════════════════════════════
+// RS Leader + Stage2 Breakout + 4H VCP Pullback — Balanced Version
+// Spiegel des Telegram-Bots: zeigt live ob alle 8 Filter erfüllt sind
+//
+// Empfohlener Timeframe: 4H (Strategie ist auf 4H Einstieg ausgelegt)
+// Daily-Filter werden via request.security("1D", ...) geholt
+// ════════════════════════════════════════════════════════════════════════════════
+indicator("VCP Balanced — 8-Filter Setup Scanner", overlay = true,
+          max_lines_count = 100, max_labels_count = 50)
+
+// ── Inputs ────────────────────────────────────────────────────────────────────
+grp_f2 = "F2 — Extension"
+ext_large_pct = input.float(12.0, "Large Caps max %", group = grp_f2, minval = 1)
+ext_alt_pct   = input.float(15.0, "Altcoins max %",   group = grp_f2, minval = 1)
+
+grp_f3 = "F3 — Breakout"
+breakout_days = input.int(30, "Lookback (Tage)", group = grp_f3, minval = 5)
+
+grp_f5 = "F5 — RS Resilienz"
+tier1_btc  = input.float(-1.5, "Tier 1: BTC fällt um", group = grp_f5)
+tier1_coin = input.float(-0.5, "Tier 1: Coin max",     group = grp_f5)
+tier2_btc  = input.float(-2.0, "Tier 2: BTC fällt um", group = grp_f5)
+tier2_coin = input.float(-1.0, "Tier 2: Coin max",     group = grp_f5)
+tier3_btc  = input.float(-3.0, "Tier 3: BTC fällt um", group = grp_f5)
+tier3_coin = input.float(-1.5, "Tier 3: Coin max",     group = grp_f5)
+
+grp_f6 = "F6 — 4H Pullback"
+prox_pct = input.float(3.0, "Max Abstand von 4H EMA20 %", group = grp_f6, minval = 0.5)
+
+grp_f7 = "F7 — VCP"
+vcp_min_hits = input.int(2, "Min Treffer (von 3)", group = grp_f7, minval = 1, maxval = 3)
+vcp_lookback = input.int(5,  "Lookback (Kerzen)",   group = grp_f7, minval = 3)
+
+grp_risk = "Risk Management"
+atr_mult  = input.float(0.5, "SL Puffer (× ATR)", group = grp_risk)
+swing_len = input.int(10,    "Swing-Low Lookback (4H)", group = grp_risk)
+crv       = input.float(2.0, "TP1 Multiplier (R)",      group = grp_risk)
+
+grp_view = "Anzeige"
+show_table   = input.bool(true, "Filter-Tabelle anzeigen",  group = grp_view)
+show_levels  = input.bool(true, "Entry/SL/TP-Linien zeigen", group = grp_view)
+show_emas    = input.bool(true, "EMAs anzeigen",             group = grp_view)
+btc_symbol   = input.symbol("BINANCE:BTCUSDT", "BTC Symbol", group = grp_view)
+
+// ── Large Cap Detection ───────────────────────────────────────────────────────
+base    = syminfo.basecurrency
+is_large = base == "ETH" or base == "BNB" or base == "XRP" or base == "LTC"
+ext_limit = is_large ? ext_large_pct : ext_alt_pct
+
+// ── DAILY DATA (F1, F2, F3, F4) ───────────────────────────────────────────────
+[d_close, d_ema50, d_ema200, d_ema200_20ago, d_prior_high] = request.security(
+     syminfo.tickerid, "1D",
+     [close, ta.ema(close, 50), ta.ema(close, 200), ta.ema(close, 200)[20],
+      ta.highest(high, breakout_days)[1]],
+     lookahead = barmerge.lookahead_off)
+
+// BTC Daily für RS
+[btc_close, btc_close_prev] = request.security(btc_symbol, "1D",
+     [close, close[1]], lookahead = barmerge.lookahead_off)
+
+// Coin Daily für RS (gleichzeitig mit BTC)
+coin_d_close      = d_close
+coin_d_close_prev = request.security(syminfo.tickerid, "1D", close[1],
+     lookahead = barmerge.lookahead_off)
+
+// ── F1: Daily Golden Cross ────────────────────────────────────────────────────
+f1_cross  = d_ema50 > d_ema200
+f1_rising = d_ema200 > d_ema200_20ago
+f1_ok     = f1_cross and f1_rising
+
+// ── F2: Nicht zu extended ─────────────────────────────────────────────────────
+ext_pct = (d_close - d_ema50) / d_ema50 * 100
+f2_ok   = ext_pct <= ext_limit
+
+// ── F3: 30-Tage-Hoch Breakout ────────────────────────────────────────────────
+f3_ok         = d_close > d_prior_high
+breakout_diff = (d_close - d_prior_high) / d_prior_high * 100
+
+// ── F4: Coin/BTC Ratio steigt (RS) ────────────────────────────────────────────
+rs_ratio        = d_close / btc_close
+rs_ema_now      = ta.ema(rs_ratio, 20)
+rs_ema_10ago    = ta.ema(rs_ratio, 20)[10]
+f4_ok           = rs_ema_now > rs_ema_10ago
+
+// ── F5: RS Resilienz (gestaffelt) ─────────────────────────────────────────────
+// Für jeden Tag der letzten 30: wenn BTC fällt → prüfe ob Coin innerhalb Tier-Grenze
+btc_chg  = (btc_close      - btc_close_prev)      / btc_close_prev      * 100
+coin_chg = (coin_d_close   - coin_d_close_prev)   / coin_d_close_prev   * 100
+
+tier_violated = false
+if btc_chg <= tier3_btc and coin_chg < tier3_coin
+    tier_violated := true
+else if btc_chg <= tier2_btc and coin_chg < tier2_coin
+    tier_violated := true
+else if btc_chg <= tier1_btc and coin_chg < tier1_coin
+    tier_violated := true
+violations_30d = math.sum(tier_violated ? 1 : 0, 30)
+f5_ok = violations_30d == 0
+
+// ── 4H DATA (F6, F7, F8) ──────────────────────────────────────────────────────
+[h4_open, h4_close, h4_high, h4_low, h4_open_prev, h4_close_prev, h4_ema20,
+ h4_atr_recent, h4_atr_prev, h4_swing_low] = request.security(
+     syminfo.tickerid, "240",
+     [open, close, high, low, open[1], close[1], ta.ema(close, 20),
+      ta.atr(14), ta.atr(14)[vcp_lookback],
+      ta.lowest(low, swing_len)],
+     lookahead = barmerge.lookahead_off)
+
+// 4H VCP Range & Volume (eigene Security-Calls)
+[h4_range_recent, h4_range_prev, h4_vol_recent, h4_vol_prev] = request.security(
+     syminfo.tickerid, "240",
+     [math.sum(high - low, vcp_lookback) / vcp_lookback,
+      math.sum(high - low, vcp_lookback)[vcp_lookback] / vcp_lookback,
+      math.sum(volume,     vcp_lookback) / vcp_lookback,
+      math.sum(volume,     vcp_lookback)[vcp_lookback] / vcp_lookback],
+     lookahead = barmerge.lookahead_off)
+
+// ── F6: 4H EMA20 Pullback ─────────────────────────────────────────────────────
+dist_4h = (h4_close - h4_ema20) / h4_ema20 * 100
+f6_ok   = dist_4h >= -1.5 and dist_4h <= prox_pct
+
+// ── F7: VCP — 2 von 3 müssen erfüllt sein ─────────────────────────────────────
+f7_range = h4_range_recent < h4_range_prev
+f7_vol   = h4_vol_recent   < h4_vol_prev * 0.9
+f7_atr   = h4_atr_recent   < h4_atr_prev
+vcp_hits = (f7_range ? 1 : 0) + (f7_vol ? 1 : 0) + (f7_atr ? 1 : 0)
+f7_ok    = vcp_hits >= vcp_min_hits
+
+// ── F8: Bullische Bestätigung (grün ODER Bullish Engulfing) ──────────────────
+f8_green  = h4_close > h4_open
+f8_engulf = h4_close > h4_open and h4_close_prev < h4_open_prev
+            and h4_open <= h4_close_prev and h4_close >= h4_open_prev
+f8_ok     = f8_green or f8_engulf
+
+// ── ALLE FILTER ───────────────────────────────────────────────────────────────
+all_pass = f1_ok and f2_ok and f3_ok and f4_ok and f5_ok and f6_ok and f7_ok and f8_ok
+
+// ── SL / TP1 ──────────────────────────────────────────────────────────────────
+entry_price = h4_close
+sl_price    = h4_swing_low - atr_mult * h4_atr_recent
+risk_dist   = entry_price - sl_price
+tp1_price   = entry_price + crv * risk_dist
+sl_pct      = (entry_price - sl_price) / entry_price * 100
+tp1_pct     = (tp1_price   - entry_price) / entry_price * 100
+
+// ── PLOTS — EMAs ─────────────────────────────────────────────────────────────
+plot(show_emas ? h4_ema20 : na,  "4H EMA20",    color = color.new(color.blue, 0),  linewidth = 2)
+plot(show_emas ? d_ema50  : na,  "Daily EMA50", color = color.new(color.orange, 0), linewidth = 1)
+plot(show_emas ? d_ema200 : na,  "Daily EMA200",color = color.new(color.gray, 0),   linewidth = 1)
+
+// ── Setup Signal — Pfeil unter Kerze ──────────────────────────────────────────
+setup_fresh = all_pass and not all_pass[1]
+plotshape(setup_fresh, "SETUP", shape.triangleup, location.belowbar,
+          color = color.new(color.green, 0), size = size.large, text = "SETUP")
+
+// Hintergrund einfärben wenn Setup aktiv
+bgcolor(all_pass ? color.new(color.green, 90) : na, title = "Setup-Background")
+
+// ── Entry / SL / TP Linien (nur wenn Setup aktiv) ────────────────────────────
+var line entry_line = na
+var line sl_line    = na
+var line tp_line    = na
+var label entry_lbl = na
+var label sl_lbl    = na
+var label tp_lbl    = na
+
+if show_levels and setup_fresh
+    line.delete(entry_line)
+    line.delete(sl_line)
+    line.delete(tp_line)
+    label.delete(entry_lbl)
+    label.delete(sl_lbl)
+    label.delete(tp_lbl)
+    entry_line := line.new(bar_index, entry_price, bar_index + 20, entry_price,
+         color = color.blue, width = 2, extend = extend.right, style = line.style_dashed)
+    sl_line    := line.new(bar_index, sl_price,    bar_index + 20, sl_price,
+         color = color.red, width = 2, extend = extend.right, style = line.style_dashed)
+    tp_line    := line.new(bar_index, tp1_price,   bar_index + 20, tp1_price,
+         color = color.green, width = 2, extend = extend.right, style = line.style_dashed)
+    entry_lbl := label.new(bar_index + 20, entry_price,
+         "Entry " + str.tostring(entry_price, format.mintick),
+         color = color.blue, textcolor = color.white, style = label.style_label_left)
+    sl_lbl    := label.new(bar_index + 20, sl_price,
+         "SL " + str.tostring(sl_price, format.mintick) + "  (-" + str.tostring(sl_pct, "#.#") + "%)",
+         color = color.red, textcolor = color.white, style = label.style_label_left)
+    tp_lbl    := label.new(bar_index + 20, tp1_price,
+         "TP1 " + str.tostring(tp1_price, format.mintick) + "  (+" + str.tostring(tp1_pct, "#.#") + "%)",
+         color = color.green, textcolor = color.white, style = label.style_label_left)
+
+// ── Filter-Tabelle (oben rechts) ──────────────────────────────────────────────
+var table info = table.new(position.top_right, 3, 11,
+                            bgcolor = color.new(color.black, 80),
+                            border_width = 1, border_color = color.gray)
+
+f_color(b) => b ? color.new(color.green, 0) : color.new(color.red, 0)
+f_text(b)  => b ? "✓" : "✗"
+
+if show_table and barstate.islast
+    cap_str = is_large ? "Large Cap" : "Altcoin"
+    table.cell(info, 0, 0, "Filter",  text_color = color.white, bgcolor = color.gray)
+    table.cell(info, 1, 0, "Status",  text_color = color.white, bgcolor = color.gray)
+    table.cell(info, 2, 0, "Wert",    text_color = color.white, bgcolor = color.gray)
+
+    table.cell(info, 0, 1, "F1 Daily Golden Cross",  text_color = color.white)
+    table.cell(info, 1, 1, f_text(f1_ok), text_color = f_color(f1_ok))
+    table.cell(info, 2, 1, f1_cross ? (f1_rising ? "ok" : "EMA200↓") : "kein Cross",
+               text_color = color.white)
+
+    table.cell(info, 0, 2, "F2 Extension (" + cap_str + ")", text_color = color.white)
+    table.cell(info, 1, 2, f_text(f2_ok), text_color = f_color(f2_ok))
+    table.cell(info, 2, 2, str.tostring(ext_pct, "#.#") + "% / " +
+                            str.tostring(ext_limit, "#") + "%",
+               text_color = color.white)
+
+    table.cell(info, 0, 3, "F3 " + str.tostring(breakout_days) + "T-Hoch Breakout",
+               text_color = color.white)
+    table.cell(info, 1, 3, f_text(f3_ok), text_color = f_color(f3_ok))
+    table.cell(info, 2, 3, (f3_ok ? "+" : "") + str.tostring(breakout_diff, "#.#") + "%",
+               text_color = color.white)
+
+    table.cell(info, 0, 4, "F4 RS Coin/BTC ↑",  text_color = color.white)
+    table.cell(info, 1, 4, f_text(f4_ok), text_color = f_color(f4_ok))
+    table.cell(info, 2, 4, "", text_color = color.white)
+
+    table.cell(info, 0, 5, "F5 RS Resilienz (30T)", text_color = color.white)
+    table.cell(info, 1, 5, f_text(f5_ok), text_color = f_color(f5_ok))
+    table.cell(info, 2, 5, str.tostring(violations_30d) + " Verletzungen",
+               text_color = color.white)
+
+    table.cell(info, 0, 6, "F6 4H EMA20 Pullback",  text_color = color.white)
+    table.cell(info, 1, 6, f_text(f6_ok), text_color = f_color(f6_ok))
+    table.cell(info, 2, 6, str.tostring(dist_4h, "+#.#;-#.#") + "%",
+               text_color = color.white)
+
+    table.cell(info, 0, 7, "F7 VCP Kompression",  text_color = color.white)
+    table.cell(info, 1, 7, f_text(f7_ok), text_color = f_color(f7_ok))
+    table.cell(info, 2, 7, str.tostring(vcp_hits) + "/3",
+               text_color = color.white)
+
+    table.cell(info, 0, 8, "F8 Bullish Confirm",  text_color = color.white)
+    table.cell(info, 1, 8, f_text(f8_ok), text_color = f_color(f8_ok))
+    table.cell(info, 2, 8, f8_engulf ? "Engulfing" : (f8_green ? "Grün" : "Rot"),
+               text_color = color.white)
+
+    table.cell(info, 0, 9, "SETUP",
+               bgcolor = all_pass ? color.green : color.new(color.gray, 50),
+               text_color = color.white)
+    table.cell(info, 1, 9, all_pass ? "JA" : "NEIN",
+               bgcolor = all_pass ? color.green : color.new(color.gray, 50),
+               text_color = color.white)
+    table.cell(info, 2, 9, "", bgcolor = all_pass ? color.green : color.new(color.gray, 50))
+
+    if all_pass
+        table.cell(info, 0, 10, "Entry: " + str.tostring(entry_price, format.mintick),
+                   text_color = color.blue)
+        table.cell(info, 1, 10, "SL: "    + str.tostring(sl_price, format.mintick),
+                   text_color = color.red)
+        table.cell(info, 2, 10, "TP1: "   + str.tostring(tp1_price, format.mintick),
+                   text_color = color.green)
+    else
+        table.cell(info, 0, 10, "", text_color = color.white)
+        table.cell(info, 1, 10, "", text_color = color.white)
+        table.cell(info, 2, 10, "", text_color = color.white)
+
+// ── Alert ─────────────────────────────────────────────────────────────────────
+alertcondition(setup_fresh, "VCP Setup gefunden!",
+   "{{ticker}} — alle 8 Filter erfüllt. Entry, SL, TP1 im Chart.")
