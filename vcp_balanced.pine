@@ -42,6 +42,19 @@ show_table   = input.bool(true, "Filter-Tabelle anzeigen",  group = grp_view)
 show_levels  = input.bool(true, "Entry/SL/TP-Linien zeigen", group = grp_view)
 show_emas    = input.bool(true, "EMAs anzeigen",             group = grp_view)
 btc_symbol   = input.symbol("BINANCE:BTCUSDT", "BTC Symbol", group = grp_view)
+table_pos_in = input.string("Oben rechts", "Tabellen-Position", group = grp_view,
+     options = ["Oben links", "Oben rechts", "Mitte links", "Mitte rechts",
+                "Unten links", "Unten rechts"])
+
+// Mapping Input-String → Pine position
+table_pos = switch table_pos_in
+    "Oben links"    => position.top_left
+    "Oben rechts"   => position.top_right
+    "Mitte links"   => position.middle_left
+    "Mitte rechts"  => position.middle_right
+    "Unten links"   => position.bottom_left
+    "Unten rechts"  => position.bottom_right
+    =>                 position.top_right
 
 // ── Large Cap Detection ───────────────────────────────────────────────────────
 base    = syminfo.basecurrency
@@ -187,8 +200,8 @@ if show_levels and setup_fresh
          "TP1 " + str.tostring(tp1_price, format.mintick) + "  (+" + str.tostring(tp1_pct, "#.#") + "%)",
          color = color.green, textcolor = color.white, style = label.style_label_left)
 
-// ── Filter-Tabelle (oben rechts) ──────────────────────────────────────────────
-var table info = table.new(position.top_right, 3, 11,
+// ── Filter-Tabelle (Position via Input einstellbar) ───────────────────────────
+var table info = table.new(table_pos, 3, 11,
                             bgcolor = color.new(color.black, 80),
                             border_width = 1, border_color = color.gray)
 
