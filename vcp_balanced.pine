@@ -129,8 +129,7 @@ f7_ok    = vcp_hits >= vcp_min_hits
 
 // ── F8: Bullische Bestätigung (grün ODER Bullish Engulfing) ──────────────────
 f8_green  = h4_close > h4_open
-f8_engulf = h4_close > h4_open and h4_close_prev < h4_open_prev
-            and h4_open <= h4_close_prev and h4_close >= h4_open_prev
+f8_engulf = h4_close > h4_open and h4_close_prev < h4_open_prev and h4_open <= h4_close_prev and h4_close >= h4_open_prev
 f8_ok     = f8_green or f8_engulf
 
 // ── ALLE FILTER ───────────────────────────────────────────────────────────────
